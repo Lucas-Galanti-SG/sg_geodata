@@ -1,0 +1,38 @@
+﻿# Dados sensiveis - NAO versionar
+CNPJs_SGA.csv
+dados_SGA.CSV
+df_interesse_norton_enriquecido.csv
+oportunidades_fora_cobertura*.xlsx
+
+# Configuracao local (contem caminhos de maquina)
+config.json
+
+# Pasta de dados completa (arquivos pesados ou sensiveis)
+data/
+
+# Shapefiles IBGE (baixados automaticamente pela aplicacao)
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+
+# Arquivos temporarios e bancos locais
+*.duckdb
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
