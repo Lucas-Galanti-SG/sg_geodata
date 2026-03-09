@@ -307,16 +307,23 @@ if ss.get("ai_ctx_ready"):
         ss["ai_cnae_result"] = _cnae_df
 
         _top_n = 10
-        _total_cnpjs = _cnae_df["n_cnpjs"].sum()
+        # totais da BASE COMPLETA (todos os CNAEs atendidos, não apenas top 10)
+        _total_cnpjs      = _cnae_df["n_cnpjs"].sum()
+        _total_soma_valor = _cnae_df["soma_valor"].sum()
         _df10_cnt = _cnae_df.nlargest(_top_n, "n_cnpjs").copy()
         _df10_val = _cnae_df.nlargest(_top_n, "soma_valor").copy()
 
-        def _pareto_fig(df, x_col, title, x_label):
+        def _pareto_fig(df, x_col, title, x_label, base_total: float):
+            """
+            Constrói o gráfico de Pareto para os top-N CNAEs exibidos.
+            O % e o ACC são calculados sobre `base_total` (total da base completa),
+            não sobre a soma dos top-N exibidos.
+            """
             df = df.sort_values(x_col, ascending=False).reset_index(drop=True)
-            total = df[x_col].sum()
-            if total == 0:
+            if base_total == 0:
                 return go.Figure()
-            df["pct"] = df[x_col] / total * 100
+            # pct e pct_acc relativos ao TOTAL da base, não ao total dos top-N
+            df["pct"]     = df[x_col] / base_total * 100
             df["pct_acc"] = df["pct"].cumsum()
 
             def _abc_color(acc):
@@ -327,8 +334,11 @@ if ss.get("ai_ctx_ready"):
                 return "#9E9E9E"       # cinza   — C
 
             df["color"] = df["pct_acc"].apply(_abc_color)
-            df["label"] = (df["cnae_principal"].astype(str) + " – "
-                           + df["cnae_principal_desc"].fillna("").str[:40])
+            # Limite de 55 caracteres para a descrição, evitando cortes abruptos
+            df["label"] = (
+                df["cnae_principal"].astype(str) + " – "
+                + df["cnae_principal_desc"].fillna("").str[:55]
+            )
             df["text_lbl"] = df.apply(
                 lambda r: f"  {r['pct']:.1f}%  |  acc {r['pct_acc']:.1f}%", axis=1
             )
@@ -352,9 +362,10 @@ if ss.get("ai_ctx_ready"):
                 ))
             fig.update_layout(
                 title=title,
-                height=max(380, len(df) * 42),
-                margin=dict(l=10, r=230, t=40, b=10),
-                legend=dict(orientation="h", y=1.08, x=0),
+                # t=70 garante espaço suficiente abaixo do título para a legenda horizontal
+                height=max(400, len(df) * 42),
+                margin=dict(l=10, r=230, t=70, b=10),
+                legend=dict(orientation="h", y=1.14, x=0),
                 xaxis=dict(showgrid=True, autorange=True),
             )
             return fig
@@ -362,16 +373,22 @@ if ss.get("ai_ctx_ready"):
         _ca, _cb = st.columns(2)
         with _ca:
             st.plotly_chart(
-                _pareto_fig(_df10_cnt, "n_cnpjs",
-                            f"Top {_top_n} CNAEs por nº de clientes (total: {_total_cnpjs:,})",
-                            "Clientes"),
-                use_container_width=True, key="ai_fig_pareto_cnt")
+                _pareto_fig(
+                    _df10_cnt, "n_cnpjs",
+                    f"Top {_top_n} CNAEs por nº de clientes (total base: {_total_cnpjs:,})",
+                    "Clientes",
+                    base_total=float(_total_cnpjs),
+                ),
+                width="stretch", key="ai_fig_pareto_cnt")
         with _cb:
             st.plotly_chart(
-                _pareto_fig(_df10_val, "soma_valor",
-                            "Top 10 CNAEs por valor agregado (relevancia_valor)",
-                            "Valor"),
-                use_container_width=True, key="ai_fig_pareto_val")
+                _pareto_fig(
+                    _df10_val, "soma_valor",
+                    "Top 10 CNAEs por valor agregado (total base)",
+                    "Valor",
+                    base_total=float(_total_soma_valor),
+                ),
+                width="stretch", key="ai_fig_pareto_val")
 
 # ---------------------------------------------------------------------------
 # Avaliação do mercado similar
@@ -436,23 +453,34 @@ if ss.get("ai_cnae_result") is not None:
             _atend_m  = _mkt_df[_mkt_df["cliente_atendido"] == True]
             _natend_m = _mkt_df[_mkt_df["cliente_atendido"] != True]
 
-            # Stacked bars por subclasse
+            # Stacked bars por subclasse — ordenado por não atendido decrescente
             _sagg = (_mkt_df.groupby(["cnae_principal", "cnae_principal_desc", "cliente_atendido"])
                      ["cnpj"].nunique().reset_index(name="n"))
             _top10_sub = _sagg.groupby("cnae_principal")["n"].sum().nlargest(10).index
             _sagg10 = _sagg[_sagg["cnae_principal"].isin(_top10_sub)].copy()
             _sagg10["lbl"] = (_sagg10["cnae_principal"].astype(str) + " – "
                               + _sagg10["cnae_principal_desc"].fillna("").str[:35])
+            # Ordenar por total de não atendidos (decrescente → no gráfico horizontal, maior no topo)
+            _natend_order = (
+                _sagg10[_sagg10["cliente_atendido"] != True]
+                .groupby("lbl")["n"].sum()
+                .sort_values(ascending=True)   # ascending=True → maior no topo em orientação "h"
+                .index.tolist()
+            )
+            # garante que labels sem não-atendidos também apareçam
+            _all_lbls = _sagg10["lbl"].unique().tolist()
+            _ordered_sub = _natend_order + [l for l in _all_lbls if l not in _natend_order]
             _fig_sub = go.Figure()
             for _flag, _col_c, _lbl in [(True, "#0079c1", "Atendido"), (False, "#ff6b35", "Não atendido")]:
-                _g = _sagg10[_sagg10["cliente_atendido"] == _flag]
-                _fig_sub.add_trace(go.Bar(y=_g["lbl"], x=_g["n"], orientation="h",
-                                          name=_lbl, marker_color=_col_c))
+                _g = _sagg10[_sagg10["cliente_atendido"] == _flag].set_index("lbl")["n"]
+                _g = _g.reindex(_ordered_sub, fill_value=0)
+                _fig_sub.add_trace(go.Bar(y=_g.index.tolist(), x=_g.values.tolist(),
+                                          orientation="h", name=_lbl, marker_color=_col_c))
             _fig_sub.update_layout(barmode="stack",
                                    title="CNPJs atendidos vs não atendidos por subclasse",
                                    height=400, margin=dict(l=10, r=10, t=40, b=10),
                                    legend=dict(orientation="h", y=1.06))
-            st.plotly_chart(_fig_sub, use_container_width=True, key="ai_fig_sub_stack")
+            st.plotly_chart(_fig_sub, width="stretch", key="ai_fig_sub_stack")
 
             # CNPJs por UF
             _uf_agg = (_mkt_df.groupby("uf")["cnpj"].nunique()
@@ -676,76 +704,9 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
     _df_finais_geo = _df_finais.dropna(subset=["lat", "lon"]).copy()
     _df_finais_nogeo = _df_finais[_df_finais["lat"].isna() | _df_finais["lon"].isna()].copy()
 
-    # BallTree haversine
-    _EARTH_R = 6371.0
-    with st.spinner("Calculando distâncias (BallTree haversine)…"):
-        _coords_dist_rad = np.radians(
-            _dist_geo[["lat", "lon"]].to_numpy(dtype=float)
-        )
-        _tree = BallTree(_coords_dist_rad, metric="haversine")
-
-        _coords_fin_rad = np.radians(
-            _df_finais_geo[["lat", "lon"]].to_numpy(dtype=float)
-        )
-        _dist_rad, _idx = _tree.query(_coords_fin_rad, k=1)
-        _dist_km = _dist_rad[:, 0] * _EARTH_R
-        _nearest_idx = _idx[:, 0]
-
-        _df_finais_geo = _df_finais_geo.copy()
-        _df_finais_geo["dist_km_min"]          = _dist_km
-        _df_finais_geo["cnpj_distrib_proximo"] = _dist_geo.iloc[_nearest_idx]["cnpj"].values
-        _df_finais_geo["cnpj_basico_distrib"]  = _dist_geo.iloc[_nearest_idx]["cnpj_basico"].values
-        _df_finais_geo["nome_distrib"]         = _dist_geo.iloc[_nearest_idx]["nome_fantasia"].values
-        _df_finais_geo["razao_distrib"]        = _dist_geo.iloc[_nearest_idx]["razao_social"].values
-
-    # Classificação
-    _df_finais_geo["atendimento_via"] = np.where(
-        _df_finais_geo["dist_km_min"] <= _snap_raio,
-        "Dentro do raio",
-        "Fora do raio",
-    )
-    if not _df_finais_nogeo.empty:
-        _df_finais_nogeo = _df_finais_nogeo.copy()
-        for _col_new in ["dist_km_min","cnpj_distrib_proximo","cnpj_basico_distrib",
-                         "nome_distrib","razao_distrib","atendimento_via"]:
-            _df_finais_nogeo[_col_new] = None
-        _df_finais_nogeo["atendimento_via"] = "Fora do raio"
-
-    _df_diretos = _df_diretos.copy()
-    for _col_new in ["dist_km_min","cnpj_distrib_proximo","cnpj_basico_distrib",
-                     "nome_distrib","razao_distrib"]:
-        _df_diretos[_col_new] = None
-    _df_diretos["atendimento_via"] = "Atendido direto"
-
-    _df_result = pd.concat(
-        [_df_diretos, _df_finais_geo, _df_finais_nogeo], ignore_index=True
-    )
-
-    # -----------------------------------------------------------------------
-    # Mapa
-    # -----------------------------------------------------------------------
-    st.markdown("---")
-    st.markdown("**Mapa de cobertura via distribuidores**")
-
-    _MAP_GRID = 0.05
-    _fin_dentro = _df_finais_geo[_df_finais_geo["atendimento_via"] == "Dentro do raio"]
-    _fin_fora   = _df_finais_geo[_df_finais_geo["atendimento_via"] == "Fora do raio"]
-
-    def _grid_agg(df_pts):
-        if df_pts.empty:
-            return pd.DataFrame(columns=["lat", "lon", "n"])
-        _r = df_pts[["lat", "lon"]].copy()
-        _r["_lg"] = (_r["lat"] / _MAP_GRID).round() * _MAP_GRID
-        _r["_og"] = (_r["lon"] / _MAP_GRID).round() * _MAP_GRID
-        return (
-            _r.groupby(["_lg", "_og"], sort=False).size()
-            .reset_index(name="n").rename(columns={"_lg": "lat", "_og": "lon"})
-        )
-
-    _grid_dentro = _grid_agg(_fin_dentro)
-    _grid_fora   = _grid_agg(_fin_fora)
-
-    # ── Seleção de distribuidores visíveis no mapa ────────────────────────
+    # ── Seleção de distribuidores visíveis e priorização ─────────────────
+    # (precisa ocorrer aqui, antes do BallTree, pois os valores definem quais
+    #  árvores serão construídas e como os clientes são classificados.)
     _has_relval_dist = (
         "relevancia_valor" in _df_distrib.columns
         and _df_distrib["relevancia_valor"].notna().any()
@@ -782,15 +743,174 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
         key="ai_mapa_dist_sel",
     )
 
-    if not _mapa_dist_sel or _TODAS_OPT in _mapa_dist_sel:
+    _todos_selecionados = (not _mapa_dist_sel) or (_TODAS_OPT in _mapa_dist_sel)
+
+    if _todos_selecionados:
         _dist_geo_vis = _dist_geo
+        _sel_cb_vis: set = set()   # vazio → "todos"
     else:
-        _sel_cb = set(
+        _sel_cb_vis = set(
             _dist_empresas.loc[
                 _dist_empresas["_opt"].isin(_mapa_dist_sel), "cnpj_basico"
             ]
         )
-        _dist_geo_vis = _dist_geo[_dist_geo["cnpj_basico"].isin(_sel_cb)].copy()
+        _dist_geo_vis = _dist_geo[_dist_geo["cnpj_basico"].isin(_sel_cb_vis)].copy()
+
+    # Checkbox de priorização — só faz sentido se o usuário escolheu distribuidores específicos
+    _priorizar_sel = False
+    if not _todos_selecionados:
+        _priorizar_sel = st.checkbox(
+            "Considerar apenas esses distribuidores na alocação de clientes finais não atendidos",
+            key="ai_priorizar_sel",
+            value=False,
+            help=(
+                "Se marcado, o cliente é sempre atribuído ao distribuidor selecionado mais próximo "
+                "(dentro do raio), mesmo que haja outro distribuidor não selecionado mais perto. "
+                "Se mais de um selecionado estiver no raio, o mais próximo tem prioridade."
+            ),
+        )
+
+    # BallTree haversine
+    # Construímos duas árvores quando necessário:
+    #   _tree_all  → todos os distribuidores (para detectar cobertura de "outros distribuidores")
+    #   _tree_sel  → apenas distribuidores selecionados (para priorização)
+    _EARTH_R = 6371.0
+    with st.spinner("Calculando distâncias (BallTree haversine)…"):
+        # Árvore sobre TODOS os distribuidores
+        _coords_all_rad = np.radians(_dist_geo[["lat", "lon"]].to_numpy(dtype=float))
+        _tree_all = BallTree(_coords_all_rad, metric="haversine")
+
+        # Árvore sobre distribuidores SELECIONADOS (só quando há seleção específica)
+        _has_sel_tree = not _todos_selecionados and not _dist_geo_vis.empty
+        if _has_sel_tree:
+            _coords_sel_rad = np.radians(_dist_geo_vis[["lat", "lon"]].to_numpy(dtype=float))
+            _tree_sel = BallTree(_coords_sel_rad, metric="haversine")
+        else:
+            _tree_sel = None
+
+        _coords_fin_rad = np.radians(_df_finais_geo[["lat", "lon"]].to_numpy(dtype=float))
+
+        # Query na árvore completa (distribuidor mais próximo global)
+        _dist_all_rad, _idx_all = _tree_all.query(_coords_fin_rad, k=1)
+        _dist_all_km  = _dist_all_rad[:, 0] * _EARTH_R
+        _nearest_all  = _idx_all[:, 0]
+
+        _df_finais_geo = _df_finais_geo.copy()
+        _df_finais_geo["dist_km_min"]          = _dist_all_km
+        _df_finais_geo["cnpj_distrib_proximo"] = _dist_geo.iloc[_nearest_all]["cnpj"].values
+        _df_finais_geo["cnpj_basico_distrib"]  = _dist_geo.iloc[_nearest_all]["cnpj_basico"].values
+        _df_finais_geo["nome_distrib"]         = _dist_geo.iloc[_nearest_all]["nome_fantasia"].values
+        _df_finais_geo["razao_distrib"]        = _dist_geo.iloc[_nearest_all]["razao_social"].values
+
+        # Query na árvore de selecionados (distribuidor selecionado mais próximo)
+        if _has_sel_tree:
+            _dist_sel_rad, _idx_sel = _tree_sel.query(_coords_fin_rad, k=1)
+            _dist_sel_km   = _dist_sel_rad[:, 0] * _EARTH_R
+            _nearest_sel_i = _idx_sel[:, 0]
+            _df_finais_geo["dist_km_sel"]          = _dist_sel_km
+            _df_finais_geo["cnpj_distrib_sel"]     = _dist_geo_vis.iloc[_nearest_sel_i]["cnpj"].values
+            _df_finais_geo["cnpj_basico_distrib_sel"] = _dist_geo_vis.iloc[_nearest_sel_i]["cnpj_basico"].values
+            _df_finais_geo["nome_distrib_sel"]     = _dist_geo_vis.iloc[_nearest_sel_i]["nome_fantasia"].values
+            _df_finais_geo["razao_distrib_sel"]    = _dist_geo_vis.iloc[_nearest_sel_i]["razao_social"].values
+        else:
+            for _c in ["dist_km_sel","cnpj_distrib_sel","cnpj_basico_distrib_sel",
+                       "nome_distrib_sel","razao_distrib_sel"]:
+                _df_finais_geo[_c] = None
+
+    # ── Classificação em 3 categorias ─────────────────────────────────────
+    # Vermelho : fora do alcance de qualquer distribuidor
+    # Azul     : dentro do alcance dos distribuidores SELECIONADOS (e atribuído a um deles)
+    # Verde    : dentro do alcance de outros distribuidores (não selecionados)
+    # Quando todos estão selecionados, só existem Azul (dentro) e Vermelho (fora).
+    def _classify_row(row):
+        dist_all = row["dist_km_min"]
+        if not _has_sel_tree:
+            # modo "todos selecionados": azul = dentro, vermelho = fora
+            return "Dentro do raio (selecionados)" if dist_all <= _snap_raio else "Fora do raio"
+        dist_sel = row.get("dist_km_sel", np.inf)
+        if pd.isna(dist_sel):
+            dist_sel = np.inf
+        dentro_sel   = dist_sel  <= _snap_raio
+        dentro_outros = dist_all <= _snap_raio and not dentro_sel
+
+        if _priorizar_sel:
+            # Com priorização: se estiver no raio de algum selecionado → Azul
+            if dentro_sel:
+                return "Dentro do raio (selecionados)"
+            # Se estiver no raio de outro distribuidor → Verde
+            if dentro_outros:
+                return "Dentro do raio (outros distribuidores)"
+            return "Fora do raio"
+        else:
+            # Sem priorização: atribuído ao mais próximo global
+            if dist_all > _snap_raio:
+                return "Fora do raio"
+            # O mais próximo global é um selecionado?
+            if str(row["cnpj_basico_distrib"]) in {str(x) for x in _sel_cb_vis}:
+                return "Dentro do raio (selecionados)"
+            return "Dentro do raio (outros distribuidores)"
+
+    if not _df_finais_geo.empty:
+        _df_finais_geo["atendimento_via"] = _df_finais_geo.apply(_classify_row, axis=1)
+        # Se priorizar: atualizar distrib_proximo para o distribuidor selecionado quando Azul
+        if _priorizar_sel and _has_sel_tree:
+            _mask_azul = _df_finais_geo["atendimento_via"] == "Dentro do raio (selecionados)"
+            _df_finais_geo.loc[_mask_azul, "cnpj_distrib_proximo"]   = _df_finais_geo.loc[_mask_azul, "cnpj_distrib_sel"]
+            _df_finais_geo.loc[_mask_azul, "cnpj_basico_distrib"]    = _df_finais_geo.loc[_mask_azul, "cnpj_basico_distrib_sel"]
+            _df_finais_geo.loc[_mask_azul, "nome_distrib"]           = _df_finais_geo.loc[_mask_azul, "nome_distrib_sel"]
+            _df_finais_geo.loc[_mask_azul, "razao_distrib"]          = _df_finais_geo.loc[_mask_azul, "razao_distrib_sel"]
+            _df_finais_geo.loc[_mask_azul, "dist_km_min"]            = _df_finais_geo.loc[_mask_azul, "dist_km_sel"]
+    else:
+        _df_finais_geo["atendimento_via"] = pd.Series(dtype=str)
+
+    if not _df_finais_nogeo.empty:
+        _df_finais_nogeo = _df_finais_nogeo.copy()
+        for _col_new in ["dist_km_min","cnpj_distrib_proximo","cnpj_basico_distrib",
+                         "nome_distrib","razao_distrib","atendimento_via",
+                         "dist_km_sel","cnpj_distrib_sel","cnpj_basico_distrib_sel",
+                         "nome_distrib_sel","razao_distrib_sel"]:
+            _df_finais_nogeo[_col_new] = None
+        _df_finais_nogeo["atendimento_via"] = "Fora do raio"
+
+    _df_diretos = _df_diretos.copy()
+    for _col_new in ["dist_km_min","cnpj_distrib_proximo","cnpj_basico_distrib",
+                     "nome_distrib","razao_distrib",
+                     "dist_km_sel","cnpj_distrib_sel","cnpj_basico_distrib_sel",
+                     "nome_distrib_sel","razao_distrib_sel"]:
+        _df_diretos[_col_new] = None
+    _df_diretos["atendimento_via"] = "Atendido direto"
+
+    _df_result = pd.concat(
+        [_df_diretos, _df_finais_geo, _df_finais_nogeo], ignore_index=True
+    )
+
+    # -----------------------------------------------------------------------
+    # Mapa
+    # -----------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("**Mapa de cobertura via distribuidores**")
+
+    _MAP_GRID = 0.05
+
+    # Segmentar por categoria de cor
+    _fin_azul   = _df_finais_geo[_df_finais_geo["atendimento_via"] == "Dentro do raio (selecionados)"]
+    _fin_verde  = _df_finais_geo[_df_finais_geo["atendimento_via"] == "Dentro do raio (outros distribuidores)"]
+    _fin_fora   = _df_finais_geo[_df_finais_geo["atendimento_via"] == "Fora do raio"]
+
+    def _grid_agg(df_pts):
+        if df_pts.empty:
+            return pd.DataFrame(columns=["lat", "lon", "n"])
+        _r = df_pts[["lat", "lon"]].copy()
+        _r["_lg"] = (_r["lat"] / _MAP_GRID).round() * _MAP_GRID
+        _r["_og"] = (_r["lon"] / _MAP_GRID).round() * _MAP_GRID
+        return (
+            _r.groupby(["_lg", "_og"], sort=False).size()
+            .reset_index(name="n").rename(columns={"_lg": "lat", "_og": "lon"})
+        )
+
+    _grid_azul   = _grid_agg(_fin_azul)
+    _grid_verde  = _grid_agg(_fin_verde)
+    _grid_fora_g = _grid_agg(_fin_fora)
 
     _vis_suffix = (
         f"{len(_dist_geo_vis):,} de {len(_dist_geo):,} distribuidores visíveis"
@@ -799,41 +919,66 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
     )
     st.caption(
         f"ℹ️ {len(_fin_fora):,} clientes fora do raio · "
-        f"{len(_fin_dentro):,} dentro do raio · "
-        f"{_vis_suffix} · raio fixo = {_snap_raio:.0f} km"
+        f"{len(_fin_azul):,} dentro do raio (selecionados) · "
+        + (f"{len(_fin_verde):,} dentro do raio (outros) · " if _has_sel_tree else "")
+        + f"{_vis_suffix} · raio = {_snap_raio:.0f} km"
     )
 
     _fig_mapa = go.Figure()
 
-    if not _grid_fora.empty:
-        _zmax_fora = float(_grid_fora["n"].quantile(0.90)) or 1.0
+    # Camada vermelha — fora do raio de qualquer distribuidor
+    if not _grid_fora_g.empty:
+        _zmax_fora = float(_grid_fora_g["n"].quantile(0.90)) or 1.0
         _fig_mapa.add_trace(go.Densitymapbox(
-            lat=_grid_fora["lat"], lon=_grid_fora["lon"], z=_grid_fora["n"],
+            lat=_grid_fora_g["lat"], lon=_grid_fora_g["lon"], z=_grid_fora_g["n"],
             radius=18, colorscale="Reds", zmin=0, zmax=_zmax_fora,
             showscale=False, name="Fora do raio",
             hovertemplate="Fora do raio<br>CNPJs: %{z:.0f}<extra></extra>",
         ))
 
-    if not _grid_dentro.empty:
-        _zmax_dentro = float(_grid_dentro["n"].quantile(0.90)) or 1.0
+    # Camada verde — dentro do raio de outros distribuidores (não selecionados)
+    if not _grid_verde.empty:
+        _zmax_verde = float(_grid_verde["n"].quantile(0.90)) or 1.0
         _fig_mapa.add_trace(go.Densitymapbox(
-            lat=_grid_dentro["lat"], lon=_grid_dentro["lon"], z=_grid_dentro["n"],
-            radius=18, colorscale="Blues", zmin=0, zmax=_zmax_dentro,
-            showscale=False, name="Dentro do raio",
-            hovertemplate="Dentro do raio<br>CNPJs: %{z:.0f}<extra></extra>",
+            lat=_grid_verde["lat"], lon=_grid_verde["lon"], z=_grid_verde["n"],
+            radius=18, colorscale="Greens", zmin=0, zmax=_zmax_verde,
+            showscale=False, name="Dentro do raio (outros distribuidores)",
+            hovertemplate="Outros distribuidores<br>CNPJs: %{z:.0f}<extra></extra>",
         ))
 
-    # Pontos dos distribuidores (apenas os selecionados no multiselect)
+    # Camada azul — dentro do raio dos distribuidores selecionados
+    if not _grid_azul.empty:
+        _zmax_azul = float(_grid_azul["n"].quantile(0.90)) or 1.0
+        _fig_mapa.add_trace(go.Densitymapbox(
+            lat=_grid_azul["lat"], lon=_grid_azul["lon"], z=_grid_azul["n"],
+            radius=18, colorscale="Blues", zmin=0, zmax=_zmax_azul,
+            showscale=False, name="Dentro do raio (selecionados)",
+            hovertemplate="Distribuidores selecionados<br>CNPJs: %{z:.0f}<extra></extra>",
+        ))
+
+    # Pontos dos distribuidores visíveis — amarelo com contorno preto
+    # Hover: empresa mãe (cnpj_basico) + razão social + nome fantasia do CNPJ filho
+    _emp_lbl_map = (
+        _dist_geo.groupby("cnpj_basico", as_index=False)
+        .agg(emp_rs=("razao_social", "first"), emp_nf=("nome_fantasia", "first"))
+    )
+    _dist_geo_vis_hover = _dist_geo_vis.merge(_emp_lbl_map, on="cnpj_basico", how="left")
     _fig_mapa.add_trace(go.Scattermapbox(
-        lat=_dist_geo_vis["lat"],
-        lon=_dist_geo_vis["lon"],
+        lat=_dist_geo_vis_hover["lat"],
+        lon=_dist_geo_vis_hover["lon"],
         mode="markers",
-        marker=dict(size=12, color="#0079c1", symbol="circle"),
-        name="Distribuidores",
-        text=_dist_geo_vis.apply(
+        marker=dict(
+            size=14,
+            color="#FFD700",          # amarelo dourado
+            opacity=1.0,
+        ),
+        name="Distribuidores (selecionados)" if not _todos_selecionados else "Distribuidores",
+        text=_dist_geo_vis_hover.apply(
             lambda r: (
-                f"<b>{r.get('nome_fantasia') or r.get('razao_social', r['cnpj'])}</b><br>"
-                f"CNPJ: {r['cnpj']}<br>"
+                f"<b>Empresa mãe:</b> {r.get('emp_rs') or r.get('emp_nf') or r['cnpj_basico']}<br>"
+                f"<b>CNPJ:</b> {r['cnpj']}<br>"
+                f"<b>Razão Social:</b> {r.get('razao_social') or '—'}<br>"
+                f"<b>Nome Fantasia:</b> {r.get('nome_fantasia') or '—'}<br>"
                 f"Raio: {_snap_raio:.0f} km"
             ),
             axis=1,
@@ -855,7 +1000,7 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
             y=0.01, x=0.01,
         ),
     )
-    st.plotly_chart(_fig_mapa, use_container_width=True, key="ai_fig_mapa")
+    st.plotly_chart(_fig_mapa, width="stretch", key="ai_fig_mapa")
 
     # -----------------------------------------------------------------------
     # KPIs
@@ -863,18 +1008,22 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
     st.markdown("---")
     _tot_fin   = _df_result["cnpj"].nunique()
     _n_direto  = _df_result.loc[_df_result["atendimento_via"] == "Atendido direto", "cnpj"].nunique()
-    _n_dentro  = _df_result.loc[_df_result["atendimento_via"] == "Dentro do raio",  "cnpj"].nunique()
+    _n_azul    = _df_result.loc[_df_result["atendimento_via"] == "Dentro do raio (selecionados)",         "cnpj"].nunique()
+    _n_verde   = _df_result.loc[_df_result["atendimento_via"] == "Dentro do raio (outros distribuidores)","cnpj"].nunique()
     _n_fora    = _df_result.loc[_df_result["atendimento_via"] == "Fora do raio",    "cnpj"].nunique()
 
-    _pct_dir = _n_direto / _tot_fin * 100 if _tot_fin else 0
-    _pct_den = _n_dentro / _tot_fin * 100 if _tot_fin else 0
-    _pct_for = _n_fora   / _tot_fin * 100 if _tot_fin else 0
+    _tot_nz = max(_tot_fin, 1)
+    _pct_dir  = _n_direto / _tot_nz * 100
+    _pct_azul = _n_azul   / _tot_nz * 100
+    _pct_vrd  = _n_verde  / _tot_nz * 100
+    _pct_for  = _n_fora   / _tot_nz * 100
 
-    _k1, _k2, _k3, _k4 = st.columns(4)
-    _k1.metric("Clientes finais (CNAEs)", f"{_tot_fin:,}")
-    _k2.metric("Atendidos direto",        f"{_n_direto:,}", f"{_pct_dir:.1f}%")
-    _k3.metric("Dentro do raio",          f"{_n_dentro:,}", f"{_pct_den:.1f}%")
-    _k4.metric("Fora do raio",            f"{_n_fora:,}",   f"{_pct_for:.1f}%")
+    _k1, _k2, _k3, _k4, _k5 = st.columns(5)
+    _k1.metric("Clientes finais (CNAEs)",          f"{_tot_fin:,}")
+    _k2.metric("Atendidos direto",                 f"{_n_direto:,}", f"{_pct_dir:.1f}%")
+    _k3.metric("🔵 Dentro raio (selecionados)",    f"{_n_azul:,}",   f"{_pct_azul:.1f}%")
+    _k4.metric("🟢 Dentro raio (outros distrib.)", f"{_n_verde:,}",  f"{_pct_vrd:.1f}%")
+    _k5.metric("🔴 Fora do raio",                  f"{_n_fora:,}",   f"{_pct_for:.1f}%")
 
     # -----------------------------------------------------------------------
     # Gráfico de barras horizontais por distribuidor
@@ -894,23 +1043,33 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
     if _uf_sel:
         _df_plot = _df_plot[_df_plot["uf"].isin(_uf_sel)]
 
+    # Apenas clientes finais com distribuidor alocado
+    _CATS_FINAIS = [
+        "Dentro do raio (selecionados)",
+        "Dentro do raio (outros distribuidores)",
+        "Fora do raio",
+    ]
     _df_finais_plot = _df_plot[
-        _df_plot["atendimento_via"].isin(["Dentro do raio", "Fora do raio"])
+        _df_plot["atendimento_via"].isin(_CATS_FINAIS)
         & _df_plot["cnpj_basico_distrib"].notna()
     ].copy()
 
     if not _df_finais_plot.empty:
-        # Label de TODOS os distribuidores (inclusive os sem clientes próximos)
-        _all_dist_lbl = _dist_geo[["cnpj_basico", "razao_social"]].copy()
-        _all_dist_lbl["dist_label"] = (
-            _all_dist_lbl["razao_social"].fillna("").str[:40]
-            + " ["
-            + _all_dist_lbl["cnpj_basico"].astype(str)
-            + "]"
+        # label: razão social + CNPJ base (apenas distribuidores COM clientes alocados)
+        _dist_com_alocacao = _df_finais_plot["cnpj_basico_distrib"].dropna().unique()
+        _dist_lbl_alocados = (
+            _dist_geo[_dist_geo["cnpj_basico"].isin(_dist_com_alocacao)]
+            [["cnpj_basico", "razao_social"]]
+            .drop_duplicates("cnpj_basico")
+            .copy()
+        )
+        _dist_lbl_alocados["dist_label"] = (
+            _dist_lbl_alocados["razao_social"].fillna("").str[:40]
+            + " [" + _dist_lbl_alocados["cnpj_basico"].astype(str) + "]"
         )
 
         _df_finais_plot = _df_finais_plot.merge(
-            _all_dist_lbl[["cnpj_basico", "dist_label"]].rename(
+            _dist_lbl_alocados[["cnpj_basico", "dist_label"]].rename(
                 columns={"cnpj_basico": "cnpj_basico_distrib"}
             ),
             on="cnpj_basico_distrib", how="left",
@@ -923,17 +1082,23 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
             .reset_index(name="n")
         )
 
-        # Ordenar por "Dentro do raio" decrescente — maior no topo do gráfico horizontal
-        _all_labels = _all_dist_lbl["dist_label"].tolist()
-        _dentro_cnt = (
-            _dist_agg[_dist_agg["atendimento_via"] == "Dentro do raio"]
+        # Ordenar por total de clientes alocados dentro do raio (selecionados) decrescente
+        # → maior no topo (ascending=True para gráfico horizontal)
+        _labels_with_alloc = _dist_lbl_alocados["dist_label"].tolist()
+        _azul_cnt = (
+            _dist_agg[_dist_agg["atendimento_via"] == "Dentro do raio (selecionados)"]
             .set_index("dist_label")["n"]
-            .reindex(_all_labels, fill_value=0)
+            .reindex(_labels_with_alloc, fill_value=0)
         )
-        _ordered_labels = list(_dentro_cnt.sort_values(ascending=True).index)
+        _ordered_labels = list(_azul_cnt.sort_values(ascending=True).index)
 
+        _COLOR_MAP = {
+            "Dentro do raio (selecionados)":          "#0079c1",
+            "Dentro do raio (outros distribuidores)": "#2ca02c",
+            "Fora do raio":                           "#ff6b35",
+        }
         _fig_distrib = go.Figure()
-        for _av, _colour in [("Dentro do raio", "#0079c1"), ("Fora do raio", "#ff6b35")]:
+        for _av, _colour in _COLOR_MAP.items():
             _g = (
                 _dist_agg[_dist_agg["atendimento_via"] == _av]
                 .set_index("dist_label")["n"]
@@ -946,16 +1111,20 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
         _n_bars = len(_ordered_labels)
         _fig_distrib.update_layout(
             barmode="stack",
-            title=f"Todos os {_n_bars} distribuidores — clientes finais mais próximos (top 10 visíveis; scroll/zoom para ver todos)",
-            height=400,
+            title=(
+                f"{_n_bars} distribuidores com clientes alocados"
+                " — top 10 visíveis inicialmente (scroll/zoom para ver todos)"
+            ),
+            height=max(300, min(_n_bars * 35, 700)),
+            xaxis=dict(rangemode="tozero"),   # eixo X começa em zero
             yaxis=dict(
-                range=[_n_bars - 10.5, _n_bars - 0.5],  # janela inicial: top 10 no raio
+                range=[_n_bars - 10.5, _n_bars - 0.5],
                 autorange=False,
             ),
             margin=dict(l=10, r=10, t=50, b=10),
             legend=dict(orientation="h", y=1.08),
         )
-        st.plotly_chart(_fig_distrib, use_container_width=True, key="ai_fig_distrib_bars",
+        st.plotly_chart(_fig_distrib, width="stretch", key="ai_fig_distrib_bars",
                         config={"scrollZoom": True})
     else:
         st.info("Nenhum cliente final com distribuidor associado para exibir.")
@@ -974,7 +1143,7 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
     )
 
     _df_exp = _df_result[
-        _df_result["atendimento_via"].isin(["Dentro do raio", "Fora do raio"])
+        _df_result["atendimento_via"].isin(_CATS_FINAIS)
     ].copy()
 
     if _export_mode == "Apenas fora do raio":
@@ -983,15 +1152,16 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
         _dist_options = (
             _df_result[_df_result["cnpj_basico_distrib"].notna()]
             .groupby("cnpj_basico_distrib")
-            .agg(razao=("razao_distrib", "first"))
+            .agg(razao=("razao_distrib", "first"), nf=("nome_distrib", "first"))
             .reset_index()
         )
         _dist_options["label"] = (
             _dist_options["razao"].fillna("").str[:50]
-            + " [" + _dist_options["cnpj_basico_distrib"].astype(str) + "]"
+            + "  /  " + _dist_options["nf"].fillna("").str[:30]
+            + "  [" + _dist_options["cnpj_basico_distrib"].astype(str) + "]"
         )
         _sel_dist = st.multiselect(
-            "Selecione o(s) distribuidor(es) (CNPJ base)",
+            "Selecione o(s) distribuidor(es)",
             options=_dist_options["label"].tolist(),
             key="ai_export_dist_sel",
             placeholder="Todos os distribuidores",
@@ -1001,6 +1171,27 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
                 _dist_options["label"].isin(_sel_dist), "cnpj_basico_distrib"
             ].tolist()
             _df_exp = _df_exp[_df_exp["cnpj_basico_distrib"].isin(_sel_cnpj_b)]
+
+    # Enriquecer com razão social e nome fantasia do distribuidor mais próximo
+    # Apenas as colunas novas (não cnpj_basico, que já existe como cnpj_basico_distrib)
+    _dist_info = (
+        _dist_geo[["cnpj", "razao_social", "nome_fantasia"]]
+        .rename(columns={
+            "cnpj":          "cnpj_distrib_proximo",
+            "razao_social":  "distrib_razao_social",
+            "nome_fantasia": "distrib_nome_fantasia",
+        })
+        .drop_duplicates("cnpj_distrib_proximo")
+    )
+    _df_exp = _df_exp.merge(_dist_info, on="cnpj_distrib_proximo", how="left")
+    # empresa mãe do distribuidor (nível cnpj_basico) — usa coluna já existente
+    _mae_info = (
+        _dist_geo.groupby("cnpj_basico", as_index=False)
+        .agg(distrib_empresa_mae=("razao_social", "first"))
+        .rename(columns={"cnpj_basico": "cnpj_basico_distrib"})
+    )
+    if "cnpj_basico_distrib" in _df_exp.columns:
+        _df_exp = _df_exp.merge(_mae_info, on="cnpj_basico_distrib", how="left")
 
     # Ordenar por capital social decrescente
     if "capital_social" in _df_exp.columns:
@@ -1015,7 +1206,8 @@ if ss.get("ai_subclasses_sel") and ss.get("ai_market_df") is not None:
         "capital_social", "porte_desc",
         "uf", "municipio_nome", "cep",
         "atendimento_via",
-        "cnpj_distrib_proximo", "nome_distrib",
+        "cnpj_distrib_proximo",
+        "distrib_empresa_mae", "distrib_razao_social", "distrib_nome_fantasia",
         "dist_km_min",
     ] if c in _df_exp.columns]
 

@@ -14,7 +14,8 @@
 6. [Instalação e Execução](#instalação-e-execução)
 7. [Estrutura de Pastas](#estrutura-de-pastas)
 8. [Privacidade e Segurança](#privacidade-e-segurança)
-9. [Histórico — Pipeline de Notebooks](#histórico--pipeline-de-notebooks)
+9. [Changelog](#changelog)
+10. [Histórico — Pipeline de Notebooks](#histórico--pipeline-de-notebooks)
 
 ---
 
@@ -459,6 +460,33 @@ sggeodata/
 - `oportunidades_fora_cobertura*.xlsx` — listas de prospecção
 - `data/` — todos os dados brutos e processados da RFB (pasta externa ao repo)
 - Parquets foco gerados pelo Módulo 5
+
+---
+
+## Changelog
+
+### v0.2 — 2026-03-09
+
+#### Módulo 7 — Atendimento Indireto (`pages/7_Atendimento_Indireto.py`)
+
+**Seção "CNAEs da carteira atendida"**
+- **Fix: título sobrepondo legenda ABC** — `margin top` aumentado de `t=40` → `t=70` e posição da legenda ajustada (`y=1.14`), eliminando sobreposição.
+- **Fix: % e ACC calculados sobre a base completa** — os indicadores de porcentagem e acumulado agora são calculados sobre o total de todos os CNAEs da carteira, não apenas sobre a soma dos top-10 exibidos. O parâmetro `base_total` é passado explicitamente para `_pareto_fig()`.
+- **Fix: limite de caracteres na descrição do CNAE** — tamanho máximo ampliado de 40 → 55 caracteres no label de cada barra.
+- **Fix: stacked bar "CNPJs atendidos vs não atendidos" ordenado por não atendido decrescente** — o gráfico agora ordena as subclasses pelo total de CNPJs *não atendidos* (maior no topo).
+
+**Seção "Avaliação via Distribuição" — Mapa de cobertura**
+- **Mapa com 3 camadas de cor:**
+  - 🔴 **Vermelho** — clientes fora do alcance de qualquer distribuidor.
+  - 🔵 **Azul** — clientes dentro do raio dos distribuidores selecionados no filtro.
+  - 🟢 **Verde** — clientes dentro do raio de outros distribuidores (não selecionados). Quando "todos" estão selecionados, apenas azul e vermelho são exibidos.
+- **Checkbox "Considerar apenas esses distribuidores na alocação"** — aparece somente quando distribuidores específicos estão selecionados. Se marcado, a alocação prioriza sempre o distribuidor selecionado mais próximo (dentro do raio); se desmarcado, o cliente é atribuído ao distribuidor mais próximo globalmente.
+- **Pontos dos distribuidores amarelos** — marcadores na cor amarelo (`#FFD700`) para contrastar com o mapa de calor azul. Hover exibe: empresa mãe (cnpj_basico), CNPJ filho, razão social e nome fantasia.
+- **KPIs expandidos para 5 métricas** — Clientes finais, Atendidos direto, 🔵 Dentro raio (selecionados), 🟢 Dentro raio (outros), 🔴 Fora do raio.
+- **Gráfico "Clientes finais mais próximos de cada distribuidor"** — exibe apenas distribuidores com clientes alocados (removidos distribuidores sem alocação); eixo X forçado a iniciar em zero (`rangemode="tozero"`); suporte às 3 categorias de cor.
+- **Tabela de exportação enriquecida** — adicionadas colunas `distrib_empresa_mae`, `distrib_razao_social` e `distrib_nome_fantasia` identificando o distribuidor mais próximo com dados completos. Seletor "Distribuidor específico" também exibe razão social + nome fantasia.
+- **Bugfix: `KeyError: 'cnpj_basico_distrib'`** — corrigida duplicação de chave ao fazer merge de `_dist_info` no DataFrame de exportação (a coluna já existia em `_df_result`; `cnpj_basico` foi removido do rename).
+- **Reorganização de código** — o multiselect de distribuidores visíveis e o checkbox de priorização foram movidos para *antes* do cálculo BallTree, garantindo que `_todos_selecionados`, `_dist_geo_vis`, `_sel_cb_vis` e `_priorizar_sel` estejam disponíveis na lógica de classificação.
 
 ---
 
