@@ -452,6 +452,41 @@ if ss.get("mf_do_enrich_full"):
                         ss["mf_enriched_full"] = _enrich_full_pivot(
                             _df_up, _cnpj_col_full, _seg_col_full, _valor_col_full
                         )
+                    # ── Geocodificação lat/lon via shapefile IBGE ─────────────────
+                    if _HAS_GEOPANDAS:
+                        _shp_q = subs["shapefiles"]
+                        _shp_auto = next(
+                            iter(sorted(_shp_q.glob("BR_Municipios_*.shp"), reverse=True)),
+                            None,
+                        )
+                        if _shp_auto is None:
+                            _legacy_shp = (
+                                Path(__file__).resolve().parent.parent
+                                / "BR_Municipios_2024.shp"
+                            )
+                            if _legacy_shp.exists():
+                                _shp_auto = _legacy_shp
+                        _df_geo = ss["mf_enriched_full"]
+                        if (
+                            _shp_auto is not None
+                            and "municipio_nome" in _df_geo.columns
+                            and "uf" in _df_geo.columns
+                        ):
+                            try:
+                                _centroids_exp = _load_centroids(str(_shp_auto))
+                                _jk_exp = (
+                                    _df_geo["municipio_nome"].apply(_normalize_name)
+                                    + "|"
+                                    + _df_geo["uf"].str.upper().str.strip()
+                                )
+                                _cidx_exp = _centroids_exp.set_index("_join_key")
+                                _df_geo = _df_geo.copy()
+                                _df_geo["lat"]    = _jk_exp.map(_cidx_exp["lat"])
+                                _df_geo["lon"]    = _jk_exp.map(_cidx_exp["lon"])
+                                _df_geo["CD_MUN"] = _jk_exp.map(_cidx_exp["CD_MUN"])
+                                ss["mf_enriched_full"] = _df_geo
+                            except Exception as _geo_err:
+                                st.warning(f"⚠️ Geocodificação falhou: {_geo_err}")
                     st.success("✅ Enriquecimento concluído!")
                 except Exception as _fe:
                     ss["mf_enriched_full"] = None
