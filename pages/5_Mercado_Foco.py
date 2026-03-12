@@ -168,6 +168,66 @@ def _enrich_full(df_upload: pd.DataFrame, cnpj_col: str) -> pd.DataFrame:
     )
 
 
+def _enrich_full_pivot(
+    df_upload: pd.DataFrame, cnpj_col: str, seg_col: str, valor_col: str
+) -> pd.DataFrame:
+    """
+    Tabela de dimensões: 1 linha por CNPJ com colunas {col}_{valor_segmento}.
+    valor_col é somado; demais colunas usam o primeiro valor encontrado.
+    Ao final, faz LEFT JOIN com base_unificada (RFB).
+    """
+    df = df_upload.copy()
+    df["__cnpj_limpo"] = _clean_cnpj(df[cnpj_col])
+
+    # Cópia do seg_col para incluí-la como coluna de valor no pivot
+    _seg_copy = f"__{seg_col}_copy__"
+    df[_seg_copy] = df[seg_col]
+
+    # Todas as colunas a pivotar (exceto CNPJ original, chave limpa e seg_col que vira eixo)
+    value_cols = [c for c in df.columns if c not in (cnpj_col, "__cnpj_limpo", seg_col)]
+
+    agg_dict = {
+        c: ("sum" if c == valor_col else "first")
+        for c in value_cols
+    }
+
+    df_grp = df.groupby(["__cnpj_limpo", seg_col], as_index=False, dropna=True).agg(agg_dict)
+
+    df_wide = df_grp.pivot(
+        index="__cnpj_limpo",
+        columns=seg_col,
+        values=[c for c in df_grp.columns if c not in ("__cnpj_limpo", seg_col)],
+    )
+    # Flatten MultiIndex: (col, seg_val) → col_seg_val; substituir cópia pelo nome original
+    df_wide.columns = [
+        f"{seg_col}_{seg}" if col == _seg_copy else f"{col}_{seg}"
+        for col, seg in df_wide.columns
+    ]
+    df_wide = df_wide.reset_index()
+
+    # RFB enrichment
+    cnpj_df = df_wide[["__cnpj_limpo"]].drop_duplicates()
+    con = duckdb.connect()
+    con.register("cnpj_list", cnpj_df)
+    df_rfb = con.execute(f"""
+        SELECT b.*
+        FROM '{_UNI_P}' b
+        INNER JOIN cnpj_list c ON c.__cnpj_limpo = b.cnpj
+    """).df()
+    con.close()
+
+    if "cnpj" in df_rfb.columns:
+        df_rfb = df_rfb.rename(columns={"cnpj": "__cnpj_limpo"})
+
+    pivot_cols_set = set(df_wide.columns) - {"__cnpj_limpo"}
+    df_rfb = df_rfb.drop(columns=[c for c in df_rfb.columns
+                                   if c != "__cnpj_limpo" and c in pivot_cols_set])
+
+    result = df_wide.merge(df_rfb, on="__cnpj_limpo", how="left")
+    result = result.rename(columns={"__cnpj_limpo": cnpj_col})
+    return result
+
+
 def _parse_cnaes_sec(series: pd.Series) -> pd.Series:
     """Transforma coluna de CNAEs secundários em lista de códigos numéricos."""
     def _parse(val):
@@ -295,14 +355,6 @@ if st.button("✅ Confirmar e enriquecer base", type="primary", width="stretch")
         except Exception as e:
             st.error(f"Erro no enriquecimento: {e}")
             raise
-    if ss.get("mf_do_enrich_full"):
-        with st.spinner("Buscando todos os campos RFB para sua base…"):
-            try:
-                ss["mf_enriched_full"] = _enrich_full(df_raw, cnpj_col)
-            except Exception as _full_err:
-                ss["mf_enriched_full"] = None
-                st.warning(f"Enriquecimento completo falhou: {_full_err}")
-
 if ss["mf_enriched"] is None:
     st.stop()
 
@@ -310,27 +362,119 @@ if ss["mf_enriched"] is None:
 # Exportar base própria enriquecida com dados RFB
 # ---------------------------------------------------------------------------
 
-if ss.get("mf_enriched_full") is not None:
+# ---------------------------------------------------------------------------
+# Exportar base própria enriquecida com dados da Receita Federal
+# ---------------------------------------------------------------------------
+
+if ss.get("mf_do_enrich_full"):
     st.markdown("---")
-    st.subheader("📋 Exportar base enriquecida com dados da Receita Federal")
-    _df_full = ss["mf_enriched_full"]
-    _rfb_col = "cnpj" if "cnpj" in _df_full.columns else None
-    _n_found = _df_full[_rfb_col].notna().sum() if _rfb_col else "—"
-    st.caption(
-        f"**{len(_df_full):,}** registros da sua base · "
-        f"**{_n_found:,}** com match na RFB · "
-        f"**{len(_df_full.columns)}** colunas no total"
-    )
-    with st.expander("Prévia (5 primeiras linhas)", expanded=False):
-        st.dataframe(_df_full.head(5), width="stretch", hide_index=True)
-    _csv_full = _df_full.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-    st.download_button(
-        label="⬇️ Baixar CSV enriquecido completo",
-        data=_csv_full,
-        file_name="base_propria_enriquecida_rfb.csv",
-        mime="text/csv",
-        key="mf_dl_enriched_full",
-    )
+    st.subheader("📋 Exportar base própria enriquecida com dados da Receita Federal")
+
+    _cnpj_col_full  = ss["mf_col_map"]["cnpj"]
+    _valor_col_full = ss["mf_col_map"]["valor"]
+    _df_up          = ss["mf_raw"]
+
+    # Verificar duplicação de CNPJs
+    _cnpj_clean_full = _clean_cnpj(_df_up[_cnpj_col_full])
+    _n_total_full    = len(_cnpj_clean_full)
+    _n_unique_full   = _cnpj_clean_full.nunique()
+    _has_dupes_full  = _n_unique_full < _n_total_full
+
+    if _has_dupes_full:
+        st.info(
+            f"ℹ️ Sua base tem **{_n_total_full:,} linhas** e **{_n_unique_full:,} CNPJs únicos** "
+            "— o mesmo CNPJ aparece em múltiplas linhas, provavelmente de empresas/grupos diferentes."
+        )
+        _mode_full = st.radio(
+            "Modo de exportação:",
+            options=["linha_a_linha", "dimensao"],
+            format_func=lambda x: (
+                "📄 Linha a linha — mantém todas as linhas originais, dados RFB repetidos para cada CNPJ"
+                if x == "linha_a_linha" else
+                "📐 Tabela de dimensões — uma linha por CNPJ, colunas sufixadas por valor de segmento"
+            ),
+            key="mf_enrich_mode",
+            horizontal=False,
+        )
+    else:
+        _mode_full = "linha_a_linha"
+        st.success(f"✅ **{_n_unique_full:,} CNPJs únicos** — nenhuma duplicação detectada.")
+
+    _seg_col_full  = None
+    _can_generate  = True
+
+    if _mode_full == "dimensao":
+        _other_cols_full = [c for c in _df_up.columns if c != _cnpj_col_full]
+        _seg_col_full = st.selectbox(
+            "Coluna de segmentação (seus valores viram sufixos das colunas):",
+            _other_cols_full,
+            key="mf_enrich_seg_col",
+        )
+        _seg_vals_full = sorted(_df_up[_seg_col_full].dropna().unique().tolist())
+        _n_seg_full    = len(_seg_vals_full)
+        st.caption(
+            f"**{_n_seg_full}** valores distintos em *{_seg_col_full}*: "
+            + ", ".join(f"`{v}`" for v in _seg_vals_full[:15])
+            + (" …" if _n_seg_full > 15 else "")
+        )
+        if _n_seg_full > 10:
+            st.error(
+                f"❌ **{_n_seg_full}** valores distintos em *{_seg_col_full}* — "
+                "máximo permitido é **10** para evitar explosão de colunas. "
+                "Escolha outra coluna ou use o modo linha a linha."
+            )
+            _can_generate = False
+        else:
+            _pivot_preview_cols = [
+                c for c in _df_up.columns
+                if c not in (_cnpj_col_full, _seg_col_full)
+            ]
+            _preview_ex = ", ".join(
+                f"`{c}_{v}`"
+                for c in _pivot_preview_cols[:2]
+                for v in _seg_vals_full[:3]
+            )
+            st.caption(f"Exemplo de colunas geradas: {_preview_ex} … + campos RFB")
+
+    if _can_generate:
+        if st.button(
+            "🔄 Gerar exportação enriquecida",
+            key="mf_btn_gen_full",
+            type="primary",
+            width="stretch",
+        ):
+            ss["mf_enriched_full"] = None
+            with st.spinner("Processando enriquecimento…"):
+                try:
+                    if _mode_full == "linha_a_linha":
+                        ss["mf_enriched_full"] = _enrich_full(_df_up, _cnpj_col_full)
+                    else:
+                        ss["mf_enriched_full"] = _enrich_full_pivot(
+                            _df_up, _cnpj_col_full, _seg_col_full, _valor_col_full
+                        )
+                    st.success("✅ Enriquecimento concluído!")
+                except Exception as _fe:
+                    ss["mf_enriched_full"] = None
+                    st.error(f"Erro no enriquecimento: {_fe}")
+
+    if ss.get("mf_enriched_full") is not None:
+        _df_full      = ss["mf_enriched_full"]
+        _rfb_det_col  = next((c for c in _df_full.columns if c == "razao_social"), None)
+        _n_found_full = int(_df_full[_rfb_det_col].notna().sum()) if _rfb_det_col else "?"
+        st.caption(
+            f"**{len(_df_full):,}** linhas · **{_n_found_full}** com dados RFB · "
+            f"**{len(_df_full.columns)}** colunas"
+        )
+        with st.expander("Prévia (5 primeiras linhas)", expanded=False):
+            st.dataframe(_df_full.head(5), width="stretch", hide_index=True)
+        _csv_full = _df_full.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+        st.download_button(
+            label="⬇️ Baixar CSV enriquecido completo",
+            data=_csv_full,
+            file_name="base_propria_enriquecida_rfb.csv",
+            mime="text/csv",
+            key="mf_dl_enriched_full",
+        )
 
 # ---------------------------------------------------------------------------
 # PASSO 3 — Análise de CNAEs
