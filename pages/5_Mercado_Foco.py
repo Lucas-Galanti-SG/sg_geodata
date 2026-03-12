@@ -138,6 +138,36 @@ def _enrich(df_upload: pd.DataFrame, cnpj_col: str) -> pd.DataFrame:
     return df.merge(df_base, on="__cnpj_limpo", how="left")
 
 
+def _enrich_full(df_upload: pd.DataFrame, cnpj_col: str) -> pd.DataFrame:
+    """LEFT JOIN do upload com base_unificada via CNPJ, trazendo TODOS os campos da RFB."""
+    df = df_upload.copy()
+    df["__cnpj_limpo"] = _clean_cnpj(df[cnpj_col])
+
+    cnpj_df = df[["__cnpj_limpo"]].drop_duplicates()
+
+    con = duckdb.connect()
+    con.register("cnpj_list", cnpj_df)
+    df_rfb = con.execute(f"""
+        SELECT b.*
+        FROM '{_UNI_P}' b
+        INNER JOIN cnpj_list c ON c.__cnpj_limpo = b.cnpj
+    """).df()
+    con.close()
+
+    # Renomeia coluna 'cnpj' da RFB para fazer o merge
+    if "cnpj" in df_rfb.columns:
+        df_rfb = df_rfb.rename(columns={"cnpj": "__cnpj_limpo"})
+
+    # Colunas do usuário têm prioridade — descarta RFB cols duplicadas
+    user_cols = set(df.columns) - {"__cnpj_limpo"}
+    df_rfb = df_rfb.drop(columns=[c for c in df_rfb.columns
+                                   if c != "__cnpj_limpo" and c in user_cols])
+
+    return df.merge(df_rfb, on="__cnpj_limpo", how="left").drop(
+        columns=["__cnpj_limpo"], errors="ignore"
+    )
+
+
 def _parse_cnaes_sec(series: pd.Series) -> pd.Series:
     """Transforma coluna de CNAEs secundários em lista de códigos numéricos."""
     def _parse(val):
@@ -154,9 +184,10 @@ def _parse_cnaes_sec(series: pd.Series) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 ss = st.session_state
-ss.setdefault("mf_raw",       None)
-ss.setdefault("mf_col_map",   None)
-ss.setdefault("mf_enriched",  None)
+ss.setdefault("mf_raw",           None)
+ss.setdefault("mf_col_map",       None)
+ss.setdefault("mf_enriched",      None)
+ss.setdefault("mf_enriched_full", None)
 
 # ---------------------------------------------------------------------------
 # PASSO 1 — Upload
@@ -179,9 +210,10 @@ if uploaded is not None:
         st.stop()
     # Reset downstream se novo upload
     if ss["mf_raw"] is None or list(df_raw.columns) != list(ss["mf_raw"].columns):
-        ss["mf_col_map"]  = None
-        ss["mf_enriched"] = None
-        ss["mf_nao_atend"] = None
+        ss["mf_col_map"]       = None
+        ss["mf_enriched"]      = None
+        ss["mf_enriched_full"] = None
+        ss["mf_nao_atend"]     = None
     ss["mf_raw"] = df_raw
 
 if ss["mf_raw"] is None:
@@ -233,10 +265,21 @@ filtro_cols = st.multiselect(
     ),
 )
 
+_do_enrich_full = st.checkbox(
+    "📋 Enriquecer minha base com todos os dados disponíveis da Receita Federal",
+    key="mf_do_enrich_full",
+    value=False,
+    help=(
+        "Une a sua base com TODOS os campos de base_unificada "
+        "(estabelecimentos + empresas + auxiliares) e disponibiliza para download em CSV."
+    ),
+)
+
 if st.button("✅ Confirmar e enriquecer base", type="primary", width="stretch"):
     ss["mf_col_map"] = {"cnpj": cnpj_col, "valor": valor_col, "filtros": filtro_cols}
-    ss["mf_enriched"]  = None
-    ss["mf_nao_atend"] = None
+    ss["mf_enriched"]      = None
+    ss["mf_enriched_full"] = None
+    ss["mf_nao_atend"]     = None
     with st.spinner("Cruzando CNPJs com a base unificada…"):
         try:
             df_enr = _enrich(df_raw, cnpj_col)
@@ -252,9 +295,42 @@ if st.button("✅ Confirmar e enriquecer base", type="primary", width="stretch")
         except Exception as e:
             st.error(f"Erro no enriquecimento: {e}")
             raise
+    if ss.get("mf_do_enrich_full"):
+        with st.spinner("Buscando todos os campos RFB para sua base…"):
+            try:
+                ss["mf_enriched_full"] = _enrich_full(df_raw, cnpj_col)
+            except Exception as _full_err:
+                ss["mf_enriched_full"] = None
+                st.warning(f"Enriquecimento completo falhou: {_full_err}")
 
 if ss["mf_enriched"] is None:
     st.stop()
+
+# ---------------------------------------------------------------------------
+# Exportar base própria enriquecida com dados RFB
+# ---------------------------------------------------------------------------
+
+if ss.get("mf_enriched_full") is not None:
+    st.markdown("---")
+    st.subheader("📋 Exportar base enriquecida com dados da Receita Federal")
+    _df_full = ss["mf_enriched_full"]
+    _rfb_col = "cnpj" if "cnpj" in _df_full.columns else None
+    _n_found = _df_full[_rfb_col].notna().sum() if _rfb_col else "—"
+    st.caption(
+        f"**{len(_df_full):,}** registros da sua base · "
+        f"**{_n_found:,}** com match na RFB · "
+        f"**{len(_df_full.columns)}** colunas no total"
+    )
+    with st.expander("Prévia (5 primeiras linhas)", expanded=False):
+        st.dataframe(_df_full.head(5), width="stretch", hide_index=True)
+    _csv_full = _df_full.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+    st.download_button(
+        label="⬇️ Baixar CSV enriquecido completo",
+        data=_csv_full,
+        file_name="base_propria_enriquecida_rfb.csv",
+        mime="text/csv",
+        key="mf_dl_enriched_full",
+    )
 
 # ---------------------------------------------------------------------------
 # PASSO 3 — Análise de CNAEs
