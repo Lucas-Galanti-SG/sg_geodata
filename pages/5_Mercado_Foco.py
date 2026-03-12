@@ -138,10 +138,18 @@ def _enrich(df_upload: pd.DataFrame, cnpj_col: str) -> pd.DataFrame:
     return df.merge(df_base, on="__cnpj_limpo", how="left")
 
 
-def _enrich_full(df_upload: pd.DataFrame, cnpj_col: str) -> pd.DataFrame:
+def _enrich_full(
+    df_upload: pd.DataFrame, cnpj_col: str, valor_col: str | None = None
+) -> pd.DataFrame:
     """LEFT JOIN do upload com base_unificada via CNPJ, trazendo TODOS os campos da RFB."""
     df = df_upload.copy()
     df["__cnpj_limpo"] = _clean_cnpj(df[cnpj_col])
+
+    # Converte valor para numérico (ponto como decimal)
+    if valor_col and valor_col in df.columns:
+        df[valor_col] = pd.to_numeric(
+            df[valor_col].astype(str).str.replace(",", "."), errors="coerce"
+        )
 
     cnpj_df = df[["__cnpj_limpo"]].drop_duplicates()
 
@@ -163,9 +171,13 @@ def _enrich_full(df_upload: pd.DataFrame, cnpj_col: str) -> pd.DataFrame:
     df_rfb = df_rfb.drop(columns=[c for c in df_rfb.columns
                                    if c != "__cnpj_limpo" and c in user_cols])
 
-    return df.merge(df_rfb, on="__cnpj_limpo", how="left").drop(
-        columns=["__cnpj_limpo"], errors="ignore"
-    )
+    result = df.merge(df_rfb, on="__cnpj_limpo", how="left")
+
+    # VALOR_TOTAL: soma do valor por CNPJ, mapeada de volta a cada linha
+    if valor_col and valor_col in result.columns:
+        result["VALOR_TOTAL"] = result.groupby("__cnpj_limpo")[valor_col].transform("sum")
+
+    return result.drop(columns=["__cnpj_limpo"], errors="ignore")
 
 
 def _enrich_full_pivot(
@@ -178,6 +190,11 @@ def _enrich_full_pivot(
     """
     df = df_upload.copy()
     df["__cnpj_limpo"] = _clean_cnpj(df[cnpj_col])
+
+    # Converte valor para numérico (ponto como decimal) antes do groupby
+    df[valor_col] = pd.to_numeric(
+        df[valor_col].astype(str).str.replace(",", "."), errors="coerce"
+    )
 
     # Cópia do seg_col para incluí-la como coluna de valor no pivot
     _seg_copy = f"__{seg_col}_copy__"
@@ -225,6 +242,14 @@ def _enrich_full_pivot(
 
     result = df_wide.merge(df_rfb, on="__cnpj_limpo", how="left")
     result = result.rename(columns={"__cnpj_limpo": cnpj_col})
+
+    # VALOR_TOTAL: soma de todas as colunas {valor_col}_{seg} no pivot
+    _valor_cols_pivot = [c for c in result.columns if c.startswith(f"{valor_col}_")]
+    if _valor_cols_pivot:
+        result["VALOR_TOTAL"] = result[_valor_cols_pivot].apply(
+            pd.to_numeric, errors="coerce"
+        ).sum(axis=1)
+
     return result
 
 
@@ -447,7 +472,7 @@ if ss.get("mf_do_enrich_full"):
             with st.spinner("Processando enriquecimento…"):
                 try:
                     if _mode_full == "linha_a_linha":
-                        ss["mf_enriched_full"] = _enrich_full(_df_up, _cnpj_col_full)
+                        ss["mf_enriched_full"] = _enrich_full(_df_up, _cnpj_col_full, _valor_col_full)
                     else:
                         ss["mf_enriched_full"] = _enrich_full_pivot(
                             _df_up, _cnpj_col_full, _seg_col_full, _valor_col_full
@@ -500,8 +525,13 @@ if ss.get("mf_do_enrich_full"):
             f"**{len(_df_full):,}** linhas · **{_n_found_full}** com dados RFB · "
             f"**{len(_df_full.columns)}** colunas"
         )
-        with st.expander("Prévia (5 primeiras linhas)", expanded=False):
-            st.dataframe(_df_full.head(5), width="stretch", hide_index=True)
+        _preview_full = (
+            _df_full.sort_values("VALOR_TOTAL", ascending=False).head(10)
+            if "VALOR_TOTAL" in _df_full.columns
+            else _df_full.head(10)
+        )
+        with st.expander("Prévia — top 10 por VALOR_TOTAL", expanded=False):
+            st.dataframe(_preview_full, width="stretch", hide_index=True)
         _csv_full = _df_full.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
         st.download_button(
             label="⬇️ Baixar CSV enriquecido completo",
