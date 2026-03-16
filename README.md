@@ -14,8 +14,9 @@
 6. [Instalação e Execução](#instalação-e-execução)
 7. [Estrutura de Pastas](#estrutura-de-pastas)
 8. [Privacidade e Segurança](#privacidade-e-segurança)
-9. [Changelog](#changelog)
-10. [Histórico — Pipeline de Notebooks](#histórico--pipeline-de-notebooks)
+9. [Próximos Passos](#próximos-passos)
+10. [Changelog](#changelog)
+11. [Histórico — Pipeline de Notebooks](#histórico--pipeline-de-notebooks)
 
 ---
 
@@ -54,6 +55,7 @@ O aplicativo é dividido em duas fases claramente separadas no menu lateral:
 |--------|------|-----------|
 | 6 | 🔭 Atendimento Direto | Análise de cobertura direta da carteira por CNAE, mercado similar e oportunidades não atendidas |
 | 7 | 🏭 Atendimento Indireto | Cobertura por rede de distribuidores com raio geográfico (BallTree haversine) |
+| 8 | 🏷 Segmentação SG | Classificação versionada de CNPJs com regras (Venn 3 círculos) e edição manual |
 
 ---
 
@@ -323,6 +325,45 @@ sklearn.neighbors.BallTree(coords_distribuidores, metric="haversine")
 
 ---
 
+### Módulo 8 — Segmentação SG ✅
+
+Classificação versionada de CNPJs com a coluna **Segmentação SG**, baseada em regras configuráveis e entradas manuais. Cada alteração gera uma nova versão imutável do arquivo, com metadados de auditoria.
+
+**Gerenciamento de versões (`utils/sg_versioning.py`)**
+- Projetos e versões salvos em `{data}/processed/sinergia/{slug}/`
+- Cada versão = `v{NNN}.parquet` + `v{NNN}.json` com `author`, `timestamp`, `description`, `changes`
+- `create_version()`, `load_version()`, `list_versions()` — API completa para criação, leitura e listagem
+
+**Seção 1 — Projetos**
+- Criação de novo projeto (nome → slug automático) ou abertura de projeto existente
+- Seleção de versão com histórico completo de alterações; botão de criação de nova versão derivada
+
+**Seção 2 — Upload de base de clientes**
+- Upload CSV com auto-detecção de separador
+- Coluna `Segmentação SG` adicionada automaticamente se ausente
+
+**Seção 3 — Edição manual**
+- Multiselect de CNPJs + selectbox de valor para atribuição em lote
+- Filtros por empresa, segmentação atual, UF, CNAE
+- Tabela editável inline com `st.data_editor`
+
+**Seção 4 — Regra 1: Segmentação SG + CNAE (Diagrama de Venn)**
+- Seleciona até 2 empresas com suas segmentações (Conjunto A e B) e um CNAE principal (Conjunto C)
+- Exibe top 5 CNAEs por empresa e top 5 CNAEs consolidados (via DuckDB sobre `base_unificada`)
+- **Diagrama de Venn de 3 círculos** (triangular clássico, Plotly SVG):
+  - 🔵 A = Empresa A + segmentações selecionadas
+  - 🟠 B = Empresa B + segmentações selecionadas
+  - 🟢 C = CNAE principal informado
+  - 7 regiões exclusivas com contagem de CNPJs e valor total (R$) opcional
+- Tabela de todas as interseções ordenada por volume
+- Aplicação da segmentação ao grupo completo ou a CNPJs selecionados
+
+**Seção 5 — Salvar versão**
+- Botão de commit com campo de descrição da alteração
+- Histórico completo de versões exibido na sidebar
+
+---
+
 ## Parquet de Base Foco
 
 O arquivo `processed/foco_<nome>.parquet` é gerado pelo Módulo 5 e contém **apenas os CNPJs** que se enquadram nos CNAEs de interesse selecionados pelo usuário. Além das colunas da `base_unificada`, ele adiciona:
@@ -436,7 +477,8 @@ sggeodata/
 │   ├── 4_Exploracao.py       # Módulo 4 — KPIs, gráficos, busca textual DuckDB
 │   ├── 5_Mercado_Foco.py     # Módulo 5 — Upload base clientes → parquet foco enriquecido
 │   ├── 6_Oportunidades.py    # Módulo 6 — Atendimento Direto: contexto, CNAEs, mercado, prospecção
-│   └── 7_Atendimento_Indireto.py  # Módulo 7 — Atendimento Indireto: distribuidores + BallTree haversine
+│   ├── 7_Atendimento_Indireto.py  # Módulo 7 — Atendimento Indireto: distribuidores + BallTree haversine
+│   └── 8_Sinergia.py         # Módulo 8 — Segmentação SG versionada: regras + Venn 3 círculos
 │
 └── utils/
     ├── config.py             # Gerenciamento de config.json e subpastas de dados
@@ -445,7 +487,8 @@ sggeodata/
     ├── rfb_download.py       # WebDAV SERPRO Nextcloud: listagem, download, extração
     ├── rfb_etl.py            # ETL: Empresas/Estab/Socios/Simples → parquet unificado
     ├── build_cnae_hierarquia.py  # API REST IBGE → cnae_hierarquia.parquet
-    └── ibge_geo.py           # Download automático do shapefile IBGE via FTP
+    ├── ibge_geo.py           # Download automático do shapefile IBGE via FTP
+    └── sg_versioning.py      # Versionamento de projetos do Módulo 8 (create/load/list/commit)
 ```
 
 ---
@@ -463,7 +506,46 @@ sggeodata/
 
 ---
 
+## Próximos Passos
+
+### Módulo 8 — Segmentação SG · Regra 1 (continuação)
+
+**Detalhamento de cada região do Venn com seleção granular de clientes**
+
+Após gerar o diagrama de Venn, cada uma das 7 regiões (exclusive + interseções) deverá:
+
+1. **Listar os top 10 clientes mais relevantes** em Valor Total para aquela região.
+2. **Apresentar o total de CNPJs** da região e o valor total agregado.
+3. **Permitir duas modalidades de aplicação:**
+   - **Manter todo o grupo** — aplica a segmentação a todos os CNPJs da região com um clique.
+   - **Seleção granular** — exibe a lista completa da região; o usuário pode marcar/desmarcar CNPJs individuais para incluir ou excluir da classificação antes de aplicar.
+
+*Interface proposta:*
+- `st.expander` por região, com cabeçalho mostrando nome da interseção + contagem + valor total.
+- Dentro do expander: `st.dataframe` com top 10 + botão "Ver todos"; `st.data_editor` para seleção granular; botão "✅ Aplicar à seleção" e "✅ Aplicar ao grupo inteiro".
+- Segmentação aplicada é gravada na coluna `Segmentação SG` do DataFrame em memória (`sg_df`), sinalizando `sg_dirty = True` para o fluxo de versionamento da Seção 5.
+
+---
+
 ## Changelog
+
+### v0.3 — 2026-03-16
+
+#### Módulo 8 — Segmentação SG (`pages/8_Sinergia.py`) + Versionamento (`utils/sg_versioning.py`)
+
+**Novo módulo completo de classificação versionada de CNPJs.**
+
+- **`utils/sg_versioning.py`** — biblioteca de versionamento: `create_version()`, `load_version()`, `list_versions()`, `commit_version()`; cada versão salva em `{data}/processed/sinergia/{slug}/v{NNN}.parquet` + `.json` com auditoria completa.
+- **Seções 1–3** — gerenciamento de projetos, upload de base e edição manual (atribuição em lote e edição inline via `st.data_editor`).
+- **Seção 4 — Regra 1 (Segmentação SG + CNAE):**
+  - Seleção de até 2 empresas + segmentações (Conjunto A e B) e CNAE principal (Conjunto C).
+  - Top 5 CNAEs por empresa e top 5 consolidados via DuckDB sobre `base_unificada`.
+  - **Diagrama de Venn de 3 círculos** (triangular clássico) desenhado com Plotly SVG shapes; 7 regiões exclusivas com contagem de CNPJs + valor total opcional.
+  - Substituição do diagrama de 4 círculos (que incluía o Conjunto D = Keywords) pelo modelo de 3 círculos mais legível. Removidos: `_keywords_from_cnae`, `_PT_STOPWORDS`, `_nw`, `unicodedata`, `Counter`, session keys `sg_r1_top20_kw` e `sg_r1_kw_sel`.
+  - Tabela de todas as interseções ordenada por volume; aplicação de segmentação ao grupo union A∪B∪C.
+- **Seção 5** — commit de versão com descrição livre e exibição do histórico.
+
+---
 
 ### v0.2 — 2026-03-09
 

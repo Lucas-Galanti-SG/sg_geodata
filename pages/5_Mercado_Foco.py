@@ -23,9 +23,10 @@ try:
 except ImportError:
     _HAS_GEOPANDAS = False
 
-from utils.config import get_subfolders
+from utils.config import get_subfolders, load_findcep_config
 from utils.storage import parquet_exists
 from utils import ibge_geo
+from utils.findcep import enrich_microregioes, _clean_cep as _fc_clean, _cep5 as _fc_cep5
 from utils.sidebar import render_sidebar
 
 st.set_page_config(page_title="Mercado Foco · SGGeoData", page_icon="🎯", layout="wide")
@@ -72,6 +73,28 @@ def _normalize_name(s: str) -> str:
         .encode("ascii", "ignore")
         .decode("ascii")
     )
+
+
+@st.cache_data(show_spinner=False)
+def _fc_cep_stats(path_str: str, cep_col: str, mtime: float) -> tuple[int, int]:
+    """Conta CEPs válidos e prefixos cep5 únicos via DuckDB. Cacheado por mtime."""
+    con = duckdb.connect()
+    try:
+        result = con.execute(f"""
+            SELECT
+                count(*) FILTER (
+                    WHERE length(regexp_replace(COALESCE("{cep_col}", ''), '[^0-9]', '', 'g')) = 8
+                ) AS valid_ceps,
+                count(DISTINCT left(
+                    regexp_replace(COALESCE("{cep_col}", ''), '[^0-9]', '', 'g'), 5
+                )) FILTER (
+                    WHERE length(regexp_replace(COALESCE("{cep_col}", ''), '[^0-9]', '', 'g')) = 8
+                ) AS unique_cep5
+            FROM read_parquet('{path_str}')
+        """).fetchone()
+        return int(result[0] or 0), int(result[1] or 0)
+    finally:
+        con.close()
 
 
 @st.cache_data(show_spinner=False)
@@ -273,6 +296,239 @@ ss.setdefault("mf_raw",           None)
 ss.setdefault("mf_col_map",       None)
 ss.setdefault("mf_enriched",      None)
 ss.setdefault("mf_enriched_full", None)
+
+# ---------------------------------------------------------------------------
+# Enriquecimento geográfico por CEP — independente do CSV
+# ---------------------------------------------------------------------------
+
+_findcep_cfg    = load_findcep_config()
+_cep_cache_path = subs["processed"] / "ceps_database.parquet"
+
+st.markdown("---")
+st.subheader("📡 Enriquecimento geográfico por CEP (FindCEP)")
+st.caption(
+    "Adiciona `lat_microregiao` / `lon_microregiao` a um parquet foco já existente, "
+    "usando o prefixo de 5 dígitos do CEP (micro-região). "
+    "Resultados ficam em cache em `ceps_database.parquet`. "
+    "**Não requer upload de CSV.**"
+)
+
+_avail_pqs = sorted(
+    [p for p in subs["processed"].glob("*.parquet") if p.name != "ceps_database.parquet"]
+)
+
+if not _findcep_cfg:
+    st.caption(
+        "ℹ️ Credenciais FindCEP não configuradas — adicione `findcep_endpoint`, "
+        "`findcep_fid` e `findcep_client_id` no `config.json` para ativar."
+    )
+elif not _avail_pqs:
+    st.caption(
+        "ℹ️ Nenhum parquet encontrado em `processed/`. "
+        "Gere uma **Base Foco** nos passos abaixo primeiro."
+    )
+else:
+    _fc_pq_names = [p.name for p in _avail_pqs]
+    _fc_sel_name = st.selectbox(
+        "Parquet a enriquecer com CEP:",
+        _fc_pq_names,
+        key="mf_findcep_sel_pq",
+    )
+    _fc_sel_path = subs["processed"] / _fc_sel_name
+
+    # ── Lê schema sem carregar dados ──────────────────────────────────────
+    import pyarrow.parquet as _pq_fc
+    try:
+        _fc_schema  = _pq_fc.read_schema(_fc_sel_path)
+        _fc_cols    = [f.name for f in _fc_schema]
+        _fc_sz_mb   = _fc_sel_path.stat().st_size / 1_048_576
+        _fc_n_rows  = _pq_fc.read_metadata(_fc_sel_path).num_rows
+    except Exception as _fc_schema_err:
+        st.error(f"Não foi possível ler o parquet: {_fc_schema_err}")
+        _fc_cols   = []
+        _fc_sz_mb  = 0.0
+        _fc_n_rows = 0
+
+    # Detecta coluna de CEP: exato "cep" primeiro, depois busca case-insensitive
+    _fc_cep_col: str | None = None
+    if "cep" in _fc_cols:
+        _fc_cep_col = "cep"
+    else:
+        _cep_candidates = [c for c in _fc_cols if "cep" in c.lower()]
+        if _cep_candidates:
+            # Deixa o usuário escolher qual usar
+            _fc_cep_col = st.selectbox(
+                "Coluna de CEP (não encontrada como `cep` — selecione a equivalente):",
+                _cep_candidates,
+                key="mf_findcep_cepcol",
+            )
+
+    if _fc_cols and _fc_cep_col is None:
+        st.warning(
+            f"⚠️ Nenhuma coluna de CEP encontrada em **{_fc_sel_name}**.  \n"
+            f"Colunas disponíveis: `{'`, `'.join(_fc_cols[:20])}`"
+            + (" …" if len(_fc_cols) > 20 else "")
+        )
+
+    _fc_valid = 0
+    if _fc_cep_col:
+        with st.spinner(f"Contando CEPs em `{_fc_sel_name}`…"):
+            try:
+                _fc_mtime    = _fc_sel_path.stat().st_mtime
+                _fc_path_str = str(_fc_sel_path).replace("\\", "/")
+                _fc_valid, _fc_cep5s = _fc_cep_stats(_fc_path_str, _fc_cep_col, _fc_mtime)
+                _fcc1, _fcc2, _fcc3, _fcc4 = st.columns(4)
+                _fcc1.metric("Registros", f"{_fc_n_rows:,}")
+                _fcc2.metric("CEPs válidos", f"{_fc_valid:,}")
+                _fcc3.metric("Prefixos únicos (cep5)", f"{_fc_cep5s:,}")
+                _fcc4.metric("Tamanho", f"{_fc_sz_mb:.0f} MB")
+            except Exception as _fc_prev_err:
+                st.warning(f"⚠️ Erro ao contar CEPs em `{_fc_cep_col}`: {_fc_prev_err}")
+
+    if _fc_valid > 0:
+        if _cep_cache_path.exists():
+            try:
+                _cache_df   = pd.read_parquet(_cep_cache_path)
+                _cache_ok_n = int((_cache_df["status"] == "ok").sum())
+                st.caption(
+                    f"📦 Cache atual: **{len(_cache_df):,}** prefixos armazenados "
+                    f"({_cache_ok_n:,} com coordenadas)"
+                )
+            except Exception:
+                pass
+
+        if st.button(
+            "📡 Enriquecer com FindCEP",
+            type="primary",
+            width="content",
+            key="mf_findcep_run",
+        ):
+            with st.status("Enriquecendo com FindCEP…", expanded=True) as _fc_status:
+                try:
+                    _fc_p = str(_fc_sel_path).replace("\\", "/")
+                    _fc_tmp = _fc_sel_path.with_suffix(".tmp.parquet")
+                    _fc_tmp_p = str(_fc_tmp).replace("\\", "/")
+
+                    # ── 1. Extrai um CEP real por prefixo via DuckDB (sem carregar tudo) ──
+                    st.write("🔍 Extraindo prefixos de CEP (cep5)…")
+                    _con_pre = duckdb.connect()
+                    _cep_col_expr = f'regexp_replace(COALESCE("{_fc_cep_col}", \'\'), \'[^0-9]\', \'\', \'g\')'
+                    # any_value() devolve um CEP real (8 dígitos) por prefixo —
+                    # .astype(str) garante strings Python puras, sem tipos PyArrow
+                    _repr_ceps = _con_pre.execute(f"""
+                        SELECT any_value({_cep_col_expr}) AS cep8
+                        FROM read_parquet('{_fc_p}')
+                        WHERE length({_cep_col_expr}) = 8
+                        GROUP BY left({_cep_col_expr}, 5)
+                    """).df()["cep8"].astype(str)
+                    _con_pre.close()
+                    st.write(f"✅ {len(_repr_ceps):,} prefixos únicos identificados.")
+
+                    # ── 2. Geocodificação (API + cache) ───────────────────────
+                    st.write("📡 Geocodificando via API FindCEP (pode levar alguns minutos)…")
+                    _fc_bar   = st.progress(0, text="Aguardando…")
+                    _fc_empty = st.empty()
+
+                    def _fc_progress_cb(cur: int, tot: int, msg: str) -> None:
+                        if tot:
+                            _fc_bar.progress(min(cur / tot, 1.0), text=f"FindCEP {cur}/{tot}: {msg}")
+                        _fc_empty.caption(msg)
+
+                    _geo_df = enrich_microregioes(
+                        cep_series=_repr_ceps,
+                        cache_path=_cep_cache_path,
+                        endpoint=_findcep_cfg["endpoint"],
+                        fid=_findcep_cfg["fid"],
+                        client_id=_findcep_cfg["client_id"],
+                        progress_cb=_fc_progress_cb,
+                    )
+                    _fc_bar.progress(1.0, text="✅ Geocodificação concluída!")
+                    _fc_empty.empty()
+
+                    _fc_api    = int(_geo_df["stats_api_calls"].iloc[0])  if not _geo_df.empty else 0
+                    _fc_cache  = int(_geo_df["stats_cache_hits"].iloc[0]) if not _geo_df.empty else 0
+                    _fc_new_ok = int(_geo_df["stats_new_ok"].iloc[0])     if not _geo_df.empty else 0
+                    _fc_new_nf = int(_geo_df["stats_new_nf"].iloc[0])     if not _geo_df.empty else 0
+                    st.write(
+                        f"✅ API: {_fc_api} chamadas · cache: {_fc_cache} hits · "
+                        f"{_fc_new_ok} ok · {_fc_new_nf} não encontrados."
+                    )
+
+                    # ── 3. Merge via DuckDB — sem carregar o parquet em Pandas ──
+                    st.write("🔗 Aplicando coordenadas ao parquet via DuckDB…")
+
+                    # Pequeno DataFrame: apenas cep5 → lat_microregiao, lon_microregiao
+                    _geo_small = (
+                        _geo_df[["cep5", "lat", "lon"]]
+                        .rename(columns={"lat": "lat_microregiao", "lon": "lon_microregiao"})
+                        .dropna(subset=["lat_microregiao"])
+                    )
+
+                    # Determina colunas do parquet original (excluindo as que vamos recriar)
+                    _fc_schema_cols = _fc_schema.names
+                    _drop_cols = {"lat_microregiao", "lon_microregiao", "lat", "lon", "cep5"}
+                    _keep_cols = [c for c in _fc_schema_cols if c not in _drop_cols]
+                    _keep_expr = ", ".join(f'src."{c}"' for c in _keep_cols)
+
+                    # Descobre se há lat_municipio/lon_municipio para coalesce
+                    _has_lat_mun = "lat_municipio" in _fc_schema_cols
+                    _lat_final = (
+                        "COALESCE(geo.lat_microregiao, src.lat_municipio)"
+                        if _has_lat_mun else "geo.lat_microregiao"
+                    )
+                    _lon_final = (
+                        "COALESCE(geo.lon_microregiao, src.lon_municipio)"
+                        if _has_lat_mun else "geo.lon_microregiao"
+                    )
+
+                    _con_merge = duckdb.connect()
+                    _con_merge.register("geo_lookup", _geo_small)
+                    _con_merge.execute(f"""
+                        COPY (
+                            SELECT
+                                {_keep_expr},
+                                geo.lat_microregiao,
+                                geo.lon_microregiao,
+                                {_lat_final} AS lat,
+                                {_lon_final} AS lon
+                            FROM read_parquet('{_fc_p}') AS src
+                            LEFT JOIN geo_lookup AS geo
+                                ON left(
+                                    regexp_replace(
+                                        COALESCE(src."{_fc_cep_col}", ''), '[^0-9]', '', 'g'
+                                    ), 5
+                                ) = geo.cep5
+                        ) TO '{_fc_tmp_p}' (FORMAT PARQUET, COMPRESSION SNAPPY)
+                    """)
+                    _fc_matched_q = _con_merge.execute(
+                        f"SELECT count(*) FROM read_parquet('{_fc_tmp_p}') WHERE lat_microregiao IS NOT NULL"
+                    ).fetchone()[0]
+                    _fc_total_q = _con_merge.execute(
+                        f"SELECT count(*) FROM read_parquet('{_fc_tmp_p}')"
+                    ).fetchone()[0]
+                    _con_merge.close()
+
+                    st.write(f"✅ {_fc_matched_q:,}/{_fc_total_q:,} registros com lat/lon por CEP.")
+
+                    # ── 4. Substitui o parquet original atomicamente ──────────
+                    st.write(f"💾 Salvando `{_fc_sel_name}`…")
+                    _fc_tmp.replace(_fc_sel_path)
+                    st.write("✅ Arquivo salvo.")
+
+                    _fc_status.update(
+                        label=(
+                            f"✅ Concluído — {_fc_matched_q:,}/{_fc_total_q:,} registros "
+                            f"geocodificados por CEP"
+                        ),
+                        state="complete",
+                        expanded=False,
+                    )
+                except Exception as _fc_err:
+                    if "_fc_tmp" in dir() and _fc_tmp.exists():
+                        _fc_tmp.unlink(missing_ok=True)
+                    _fc_status.update(label="❌ FindCEP falhou", state="error", expanded=True)
+                    st.error(f"FindCEP falhou: {_fc_err}")
+                    raise
 
 # ---------------------------------------------------------------------------
 # PASSO 1 — Upload
@@ -1017,9 +1273,9 @@ if classes_sel:
                         st.warning(
                             f"⚠️ Marcação de carteira falhou (parquet salvo sem esses campos): {_cli_err}"
                         )
-                # ── Enriquecimento lat/lon ────────────────────────────────────────
+                # ── Enriquecimento lat/lon (centróide município) ──────────────────
                 if _enrich_latlon and Path(_shp_path).exists():
-                    with st.spinner("Calculando centróides e adicionando lat/lon…"):
+                    with st.spinner("Calculando centróides e adicionando lat/lon do município…"):
                         try:
                             centroids = _load_centroids(_shp_path)
                             df_pq = pd.read_parquet(_foco_custom_path)
@@ -1029,20 +1285,24 @@ if classes_sel:
                                 + df_pq["uf"].str.upper().str.strip()
                             )
                             _cent_idx = centroids.set_index("_join_key")
-                            df_pq["lat"]    = _join_keys.map(_cent_idx["lat"])
-                            df_pq["lon"]    = _join_keys.map(_cent_idx["lon"])
-                            df_pq["CD_MUN"] = _join_keys.map(_cent_idx["CD_MUN"])
-                            matched = int(df_pq["lat"].notna().sum())
+                            df_pq["lat_municipio"] = _join_keys.map(_cent_idx["lat"])
+                            df_pq["lon_municipio"] = _join_keys.map(_cent_idx["lon"])
+                            df_pq["CD_MUN"]        = _join_keys.map(_cent_idx["CD_MUN"])
+                            # lat/lon final = melhor precisão disponível (FindCEP se ativo)
+                            df_pq["lat"] = df_pq["lat_municipio"]
+                            df_pq["lon"] = df_pq["lon_municipio"]
+                            matched_mun = int(df_pq["lat_municipio"].notna().sum())
                             df_pq.to_parquet(_foco_custom_path, index=False)
                             st.caption(
-                                f"📍 lat/lon adicionados — "
-                                f"{matched:,}/{len(df_pq):,} registros geocodificados "
-                                f"({matched/len(df_pq)*100:.1f}%)"
+                                f"📍 lat/lon município — "
+                                f"{matched_mun:,}/{len(df_pq):,} registros "
+                                f"({matched_mun/len(df_pq)*100:.1f}%)"
                             )
                         except Exception as _geo_err:
                             st.warning(
-                                f"⚠️ Geocodificação falhou (parquet salvo sem lat/lon): {_geo_err}"
+                                f"⚠️ Geocodificação município falhou (parquet salvo sem lat/lon): {_geo_err}"
                             )
+
                 _foco_mb = _foco_custom_path.stat().st_size / 1_048_576
                 st.success(
                     f"✅ **{_nome_foco}.parquet** gerado com sucesso!  \n"

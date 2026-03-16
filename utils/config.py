@@ -97,3 +97,27 @@ def get_subfolders() -> dict:
     for p in subs.values():
         p.mkdir(parents=True, exist_ok=True)
     return subs
+
+
+# ---------------------------------------------------------------------------
+# FindCEP credentials
+# ---------------------------------------------------------------------------
+
+_FINDCEP_KEYS = ["findcep_endpoint", "findcep_fid", "findcep_client_id"]
+
+
+def load_findcep_config(cfg: dict | None = None) -> dict | None:
+    """
+    Retorna dict com {endpoint, fid, client_id} se todas as 3 chaves estiverem
+    em config.json, ou None se alguma estiver ausente/vazia.
+    """
+    if cfg is None:
+        cfg = load_config()
+    vals = {k: cfg.get(k, "").strip() for k in _FINDCEP_KEYS}
+    if all(vals.values()):
+        return {
+            "endpoint": vals["findcep_endpoint"],
+            "fid": vals["findcep_fid"],
+            "client_id": vals["findcep_client_id"],
+        }
+    return None

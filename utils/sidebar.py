@@ -123,5 +123,6 @@ def render_sidebar() -> None:
         st.caption("📈 ANÁLISE E PROSPECÇÃO")
         st.page_link("pages/6_Oportunidades.py",         label="6 · Oportunidades",         icon="🔭")
         st.page_link("pages/7_Atendimento_Indireto.py",  label="7 · Atendimento Indireto",  icon="🏭")
+        st.page_link("pages/8_Sinergia.py",              label="8 · Sinergia e Multiclass.", icon="🔀")
         st.divider()
         st.caption("v0.1 · Março 2026")
