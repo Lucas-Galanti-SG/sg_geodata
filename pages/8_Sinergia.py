@@ -824,87 +824,229 @@ else:
                     _mc_b.metric("B — " + (_vd["labels"][1][:18]), "{:,}".format(sz[1]))
                     _mc_c.metric("C — CNAE", "{:,}".format(sz[2]))
 
-                    with st.expander("📋 Tabela de todas as interseções", expanded=False):
-                        _set_names = [
-                            _vd["labels"][0][:22],
-                            _vd["labels"][1][:22],
-                            "CNAE {}".format(st.session_state["sg_r1_cnae"]),
-                        ]
-                        _tbl = []
-                        for _key, (_cnt, _val) in sorted(
-                            _vd["regions"].items(), key=lambda x: -x[1][0]
-                        ):
-                            if _cnt == 0:
-                                continue
-                            _incl = " ∩ ".join(_set_names[i] for i in sorted(_key))
-                            _excl = ", ".join(
-                                "¬" + _set_names[i] for i in range(3) if i not in _key
-                            ) or "—"
-                            _row: dict = {
-                                "Interseção": _incl,
-                                "Excluindo":  _excl,
-                                "CNPJs":      _cnt,
-                            }
-                            if _vd["has_values"]:
-                                _row["Valor (R$)"] = round(_val, 2)
-                            _tbl.append(_row)
-                        if _tbl:
-                            st.dataframe(pd.DataFrame(_tbl), width="stretch", hide_index=True)
-
-                    # ----------- Aplicar classificação -----------------------
+                    # ----------- Detalhamento por região ----------------------
                     st.divider()
-                    st.markdown("**Aplicar classificação aos CNPJs identificados**")
+                    st.markdown("#### 📋 Detalhamento por região")
+                    st.caption(
+                        "Expanda cada área para ver os **top 10 clientes por Valor Total**, "
+                        "definir o rótulo de segmentação e aplicar ao grupo inteiro "
+                        "ou a clientes específicos (modo granular)."
+                    )
 
-                    _ap_c1, _ap_c2 = st.columns([3, 1])
-                    with _ap_c1:
-                        _apply_label = st.text_input(
-                            "Valor de **{}** a atribuir".format(SEG_COL),
-                            placeholder="ex: Mercado Alvo — CNAE {}".format(
-                                st.session_state["sg_r1_cnae"]
-                            ),
-                            key="sg_r1_apply_label",
+                    _set_names = [
+                        _vd["labels"][0][:25],
+                        _vd["labels"][1][:25],
+                        "CNAE {}".format(st.session_state["sg_r1_cnae"]),
+                    ]
+
+                    # Columns to display inside each region expander
+                    _disp_cols = [_cnpj_col]
+                    for _dc in ("razao_social", "nome_fantasia", "uf", "municipio_nome"):
+                        if _dc in _df.columns:
+                            _disp_cols.append(_dc)
+                    if _eff_vc and _eff_vc in _df.columns:
+                        _disp_cols.append(_eff_vc)
+
+                    # Numeric value series for sorting (NaN → 0)
+                    if _eff_vc and _eff_vc in _df.columns:
+                        _val_sort_s = pd.to_numeric(
+                            _df[_eff_vc].astype(str).str.replace(",", "."),
+                            errors="coerce",
+                        ).fillna(0)
+                        _df_r4 = _df.assign(__v=_val_sort_s)
+                    else:
+                        _df_r4 = _df.assign(__v=0)
+
+                    # Sets used to recompute exclusive regions on-the-fly
+                    _r4_sets = [
+                        set(_vd["set_A"]),
+                        set(_vd["set_B"]),
+                        set(_vd["set_C"]),
+                    ]
+                    _r4_uni = _r4_sets[0] | _r4_sets[1] | _r4_sets[2]
+
+                    for _rkey, (_rcnt, _rval) in sorted(
+                        _vd["regions"].items(), key=lambda x: -x[1][0]
+                    ):
+                        if _rcnt == 0:
+                            continue
+
+                        # Stable string ID — e.g. "0", "1", "02", "012"
+                        _rid = "".join(str(i) for i in sorted(_rkey))
+
+                        # Human-readable region label
+                        _rname = " ∩ ".join(_set_names[i] for i in sorted(_rkey))
+                        _rexcl_str = ", ".join(
+                            "¬" + _set_names[i] for i in range(3) if i not in _rkey
                         )
-                        _overwrite = st.checkbox(
-                            "Sobrescrever registros que já possuem {}".format(SEG_COL),
-                            key="sg_r1_overwrite",
-                            value=False,
-                        )
-                    with _ap_c2:
-                        st.write("")
-                        st.write("")
-                        _apply_btn = st.button(
-                            "✅ Aplicar",
-                            type="primary", width="content",
-                            key="sg_r1_apply_btn",
-                            disabled=not bool(_apply_label.strip()),
-                        )
 
-                    if _apply_btn and _apply_label.strip():
-                        _target = (
-                            set(_vd["set_A"])
-                            | set(_vd["set_B"])
-                            | set(_vd["set_C"])
-                        )
-                        _new_df = _df.copy()
-                        if SEG_COL not in _new_df.columns:
-                            _new_df[SEG_COL] = None
+                        # Expander header
+                        _ehdr = "**{}** — {:,} CNPJs".format(_rname, _rcnt)
+                        if _rval > 0:
+                            _ehdr += "  · R$ {:,.0f}".format(_rval)
+                        if _rexcl_str:
+                            _ehdr += "  _(excluindo {})_".format(_rexcl_str)
 
-                        _in_target = _new_df[_cnpj_col].astype(str).isin(_target)
-                        if not _overwrite:
-                            _in_target = _in_target & _new_df[SEG_COL].isna()
+                        with st.expander(_ehdr, expanded=False):
 
-                        _applied_n = int(_in_target.sum())
-                        _new_df.loc[_in_target, SEG_COL] = _apply_label.strip()
+                            # ---- Compute the exclusive CNPJs for this region ----
+                            _reg_cnpjs: set = set(_r4_uni)
+                            for _ri in range(3):
+                                if _ri in _rkey:
+                                    _reg_cnpjs &= _r4_sets[_ri]
+                                else:
+                                    _reg_cnpjs -= _r4_sets[_ri]
 
-                        st.session_state["sg_df"]   = _new_df
-                        st.session_state["sg_dirty"] = True
-                        st.success(
-                            "✅ **{:,}** registros classificados com *{}*. "
-                            "Use a seção abaixo para salvar a nova versão.".format(
-                                _applied_n, _apply_label.strip()
+                            # Filtered + value-sorted slice of _df for this region
+                            _df_reg = (
+                                _df_r4[
+                                    _df_r4[_cnpj_col].astype(str).isin(_reg_cnpjs)
+                                ]
+                                .sort_values("__v", ascending=False)
                             )
-                        )
-                        st.rerun()
+                            _show_c = [c for c in _disp_cols if c in _df_reg.columns]
+
+                            # Top 10 table
+                            st.caption("**Top 10 clientes por Valor Total**")
+                            st.dataframe(
+                                _df_reg[_show_c].head(10).reset_index(drop=True),
+                                width="stretch",
+                                hide_index=True,
+                            )
+                            st.caption(
+                                "{:,} clientes nesta região{}".format(
+                                    _rcnt,
+                                    " · R$ {:,.0f} total".format(_rval) if _rval > 0 else "",
+                                )
+                            )
+                            st.write("")
+
+                            # Per-region session-state keys
+                            _lbl_key = "sg_r1_lbl_{}".format(_rid)
+                            _owt_key = "sg_r1_owt_{}".format(_rid)
+                            _grn_key = "sg_r1_grn_{}".format(_rid)
+                            for _k, _dv in (
+                                (_lbl_key, ""), (_owt_key, False), (_grn_key, False)
+                            ):
+                                if _k not in st.session_state:
+                                    st.session_state[_k] = _dv
+
+                            # Label + overwrite + "Aplicar ao grupo" button
+                            _rc1, _rc2 = st.columns([3, 1])
+                            with _rc1:
+                                _r_label = st.text_input(
+                                    "Segmentação a aplicar ({})".format(SEG_COL),
+                                    placeholder="ex: Mercado Alvo — CNAE {}".format(
+                                        st.session_state["sg_r1_cnae"]
+                                    ),
+                                    key=_lbl_key,
+                                )
+                                _r_owt = st.checkbox(
+                                    "Sobrescrever registros já classificados",
+                                    key=_owt_key,
+                                )
+                            with _rc2:
+                                st.write("")
+                                st.write("")
+                                if st.button(
+                                    "✅ Aplicar ao grupo",
+                                    key="sg_r1_grp_{}".format(_rid),
+                                    type="primary",
+                                    width="content",
+                                    disabled=not bool(_r_label.strip()),
+                                ):
+                                    _ndf = st.session_state["sg_df"].copy()
+                                    if SEG_COL not in _ndf.columns:
+                                        _ndf[SEG_COL] = None
+                                    _mk = _ndf[_cnpj_col].astype(str).isin(_reg_cnpjs)
+                                    if not _r_owt:
+                                        _mk = _mk & _ndf[SEG_COL].isna()
+                                    _n_app = int(_mk.sum())
+                                    _ndf.loc[_mk, SEG_COL] = _r_label.strip()
+                                    st.session_state.update(
+                                        {"sg_df": _ndf, "sg_dirty": True}
+                                    )
+                                    st.success(
+                                        "✅ {:,} registros classificados como "
+                                        "**{}**. Salve a versão na seção abaixo.".format(
+                                            _n_app, _r_label.strip()
+                                        )
+                                    )
+                                    st.rerun()
+
+                            # ---- Modo granular (seleção individual) ----------
+                            _gran_on = st.checkbox(
+                                "🔧 Modo granular — selecionar clientes individuais",
+                                key=_grn_key,
+                            )
+                            if _gran_on:
+                                _MAX_GRAN = 500
+                                if _rcnt > _MAX_GRAN:
+                                    st.info(
+                                        "Mostrando os {:,} clientes de maior valor "
+                                        "(de {:,} no total).".format(_MAX_GRAN, _rcnt)
+                                    )
+                                _df_gran = (
+                                    _df_reg[_show_c]
+                                    .head(_MAX_GRAN)
+                                    .reset_index(drop=True)
+                                    .copy()
+                                )
+                                _df_gran.insert(0, "Incluir", True)
+                                _col_cfg: dict = {
+                                    "Incluir": st.column_config.CheckboxColumn(
+                                        "Incluir", default=True
+                                    )
+                                }
+                                for _cc in _show_c:
+                                    _col_cfg[_cc] = st.column_config.Column(disabled=True)
+
+                                _edited = st.data_editor(
+                                    _df_gran,
+                                    key="sg_r1_de_{}".format(_rid),
+                                    width="stretch",
+                                    hide_index=True,
+                                    column_config=_col_cfg,
+                                    num_rows="fixed",
+                                )
+                                _sel_cnpjs = set(
+                                    _edited.loc[
+                                        _edited["Incluir"] == True, _cnpj_col
+                                    ].astype(str)
+                                )
+                                st.caption(
+                                    "{:,} / {:,} clientes selecionados".format(
+                                        len(_sel_cnpjs),
+                                        min(_rcnt, _MAX_GRAN),
+                                    )
+                                )
+                                if st.button(
+                                    "✅ Aplicar selecionados",
+                                    key="sg_r1_sel_{}".format(_rid),
+                                    type="primary",
+                                    width="content",
+                                    disabled=not (
+                                        bool(_r_label.strip()) and len(_sel_cnpjs) > 0
+                                    ),
+                                ):
+                                    _ndf = st.session_state["sg_df"].copy()
+                                    if SEG_COL not in _ndf.columns:
+                                        _ndf[SEG_COL] = None
+                                    _ms = _ndf[_cnpj_col].astype(str).isin(_sel_cnpjs)
+                                    if not _r_owt:
+                                        _ms = _ms & _ndf[SEG_COL].isna()
+                                    _n_sel = int(_ms.sum())
+                                    _ndf.loc[_ms, SEG_COL] = _r_label.strip()
+                                    st.session_state.update(
+                                        {"sg_df": _ndf, "sg_dirty": True}
+                                    )
+                                    st.success(
+                                        "✅ {:,} registros selecionados classificados "
+                                        "como **{}**. Salve a versão abaixo.".format(
+                                            _n_sel, _r_label.strip()
+                                        )
+                                    )
+                                    st.rerun()
 
 # ---------------------------------------------------------------------------
 # Section 5 — Salvar nova versão

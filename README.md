@@ -508,26 +508,26 @@ sggeodata/
 
 ## Próximos Passos
 
-### Módulo 8 — Segmentação SG · Regra 1 (continuação)
-
-**Detalhamento de cada região do Venn com seleção granular de clientes**
-
-Após gerar o diagrama de Venn, cada uma das 7 regiões (exclusive + interseções) deverá:
-
-1. **Listar os top 10 clientes mais relevantes** em Valor Total para aquela região.
-2. **Apresentar o total de CNPJs** da região e o valor total agregado.
-3. **Permitir duas modalidades de aplicação:**
-   - **Manter todo o grupo** — aplica a segmentação a todos os CNPJs da região com um clique.
-   - **Seleção granular** — exibe a lista completa da região; o usuário pode marcar/desmarcar CNPJs individuais para incluir ou excluir da classificação antes de aplicar.
-
-*Interface proposta:*
-- `st.expander` por região, com cabeçalho mostrando nome da interseção + contagem + valor total.
-- Dentro do expander: `st.dataframe` com top 10 + botão "Ver todos"; `st.data_editor` para seleção granular; botão "✅ Aplicar à seleção" e "✅ Aplicar ao grupo inteiro".
-- Segmentação aplicada é gravada na coluna `Segmentação SG` do DataFrame em memória (`sg_df`), sinalizando `sg_dirty = True` para o fluxo de versionamento da Seção 5.
+> *(Nenhum item pendente no momento — roadmap em definição.)*
 
 ---
 
 ## Changelog
+
+### v0.4 — 2026-03-16
+
+#### Módulo 8 — Seção 4 · Detalhamento por região do Venn (`pages/8_Sinergia.py`)
+
+Substituição da tabela simples de interseções + botão único de aplicação pelo sistema de **detalhamento granular por região**:
+
+- **Expander por região** (7 no máximo, ordenado por volume decrescente), com cabeçalho exibindo nome da interseção, contagem de CNPJs e valor total (R$).
+- **Top 10 clientes por Valor Total** — `st.dataframe` dentro de cada expander, com colunas CNPJ, Razão Social, Nome Fantasia, UF, Município e coluna de valor.
+- **Campo de segmentação por região** — cada região tem seu próprio `st.text_input` para o rótulo de classificação, permitindo atribuir segmentações diferentes a regiões distintas.
+- **✅ Aplicar ao grupo** — aplica a segmentação a todos os CNPJs da região exclusiva; checkbox de sobrescrever registros já classificados.
+- **🔧 Modo granular** — `st.checkbox` que ativa um `st.data_editor` com todos os CNPJs da região (limitado a 500 por ordem de valor); colunas de dados desabilitadas para edição; coluna "Incluir" (checkbox) pré-marcada verdadeiro; botão **✅ Aplicar selecionados** aplica somente aos CNPJs marcados.
+- Toda aplicação grava na coluna `Segmentação SG` do DataFrame em sessão e sinaliza `sg_dirty = True` para o fluxo de versionamento da Seção 5.
+
+---
 
 ### v0.3 — 2026-03-16
 
